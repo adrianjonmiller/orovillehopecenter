@@ -62,7 +62,7 @@ if ( $wpdb->prefix == $wpdb->base_prefix ) {
 				function(data) {
 					data = jQuery.trim( data );
 					if ( data.charAt(0) != '1' ) {
-						alert( '<?php _e('Error starting remote send', 'it-l10n-backupbuddy' );?>:' + "\n\n" + data );
+						alert( '<?php _e("Error starting remote send", 'it-l10n-backupbuddy' );?>:' + "\n\n" + data );
 					} else {
 						alert( "<?php _e('Your file has been scheduled to be sent now. It should arrive shortly.', 'it-l10n-backupbuddy' ); ?> <?php _e( 'You will be notified by email if any problems are encountered.', 'it-l10n-backupbuddy' ); ?>" + "\n\n" + data.slice(1) );
 					}

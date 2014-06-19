@@ -88,20 +88,33 @@ class pb_backupbuddy_settings {
 		if ( $settings['default'] != '' ) { // Default was passed to add_setting().
 			$default_value = $settings['default'];
 		} else { // No default explictly set.
-			if ( $this->_savepoint !== false ) {
+			$savepoint = $this->_savepoint;
+			$raw_name = $settings['name'];
+			
+			if ( stristr( $settings['name'], '#' ) );
+			if ( false !== ( $last_hashpoint = strrpos( $settings['name'], '#' ) ) ) {
+				$temp_savepoint = substr( $settings['name'], 0, $last_hashpoint );
+				if ( ( $savepoint === false ) || ( $savepoint == '' ) ) {
+					$savepoint = $temp_savepoint;
+				} else {
+					$savepoint = $savepoint . '#' . $temp_savepoint;
+				}
+				$raw_name = substr( $settings['name'], $last_hashpoint + 1 ); // Item name with savepoint portion stripped out.
+			}
+			if ( $savepoint !== false ) {
 				
-				if ( is_array( $this->_savepoint ) ) { // Array of defaults was passed instead of savepoint.
-					$default_value = $this->_savepoint[ $settings['name'] ];
+				if ( is_array( $savepoint ) ) { // Array of defaults was passed instead of savepoint.
+					$default_value = $savepoint[ $raw_name ];
 					
 				} else { // No defaults provided, seek them out in plugins options array.
 					
 					// Default values are overwritten after a process() run with the latest data if a form was submitted.
-					$group = pb_backupbuddy::get_group( $this->_savepoint );
+					$group = pb_backupbuddy::get_group( $savepoint );
 					if ( $group === false ) {
 						$default_value = '';
 					} else {
-						if ( isset( $group[$settings['name']] ) ) { // Default is defined.
-							$default_value = $group[$settings['name']];
+						if ( isset( $group[ $raw_name ] ) ) { // Default is defined.
+							$default_value = $group[ $raw_name ];
 						} else { // Default not defined.
 							$default_value = '';
 						}
@@ -167,6 +180,7 @@ class pb_backupbuddy_settings {
 	 *	TODO: Perhaps add callback ability to this?
 	 *	This must come after all form elements have been added.
 	 *	This should usually happen in the controller prior to loading a view.
+	 *	IMPORTANT: Applies trim() to all submitted form values!
 	 *	
 	 *	@return		null/array				When a savepoint was defined in class constructor nothing is returned. (normal operation)
 	 *										When savepoint === false an array is returned for custom form processing.
@@ -177,6 +191,12 @@ class pb_backupbuddy_settings {
 			// TODO:
 			$errors = array();
 			$_posts = pb_backupbuddy::_POST();
+			
+			// Cleanup
+			foreach( $_posts as &$post_value ) {
+				$post_value = trim( $post_value );
+			}
+			
 			// loop through all posted variables, if its prefix matches this form's name then
 			foreach( $_posts as $post_name => $post_value ) {
 				if ( substr( $post_name, 0, strlen( $this->_prefix ) ) == $this->_prefix ) { // This settings form.
@@ -316,12 +336,16 @@ class pb_backupbuddy_settings {
 			}
 			
 			if ( $settings['type'] == 'title' ) { // Title item.
-				$return .= '<tr><th colspan="2" class="' . $settings['row_class'] . '"><div class="pb_htitle"';
-				if ( $first_title === true ) {
-					$return .= ' style="margin-top: 0;"';
+				if ( $first_title === true ) { // First title in list.
+					$return .= '<tr style="border: 0;"><th colspan="2" style="border: 0; padding-top: 0; padding-bottom: 0;" class="' . $settings['row_class'] . '"><h3 class="title"';
+					$return .= ' style="margin-top: 0; margin-bottom: 0.5em;"';
 					$first_title = false;
+				} else { // Subsequent titles.
+					$return .= '<tr style="border: 0;"><th colspan="2" style="border: 0;" class="' . $settings['row_class'] . '"><h3 class="title"';
+					$return .= ' style="margin: 0.5em 0;"';
 				}
-				$return .= '>' . $settings['title'] . '</div></th>';
+				
+				$return .= '>' . $settings['title'] . '</h3></th>';
 			} elseif ( $settings['type'] == 'hidden' ) { // hidden form item. no title.
 				$return .= $this->_form->get( $settings['name'], $settings['css'], $settings['classes'] );
 			} else { // Normal item.

@@ -14,14 +14,314 @@
  */
 if ( !class_exists( "pluginbuddy_zbzipexec" ) ) {
 
+	/**
+	 *	pb_backupbuddy_exec_helper Class
+	 *
+	 *	Extends the parent pb_backupbuddy_zip_helper class for the exec method.
+	 *	Although we are having the instance handling here it isn't strictly required
+	 *	for teh exec method because we have no callbacks to handle - but does no harm
+	 *	and maybe we'll just elevate this to the abstract class?
+	 *
+	 */
+	class pb_backupbuddy_exec_helper extends pb_backupbuddy_zip_helper {
+	
+		const ZIP_EXEC_BURST_MAX_PERIOD = 40;
+	
+		protected $_burst_content_size = 0;
+		protected $_burst_content_count = 0;
+		protected $_burst_count = 0;
+		protected $_burst_content_complete = false;
+		protected $_last_burst_duration = 0;
+		protected $_last_burst_size = 0;
+
+        /**
+         * Our object instance
+         * 
+         * @var $_instance 	object
+         */
+		protected static $_instance = NULL;
+	
+		// Create an instance - normally would call this
+		/**
+		 *	__construct()
+		 *	
+		 *	Default constructor.
+		 *	Record our own instance and then use the parent constructor.
+		 *	
+		 *	@return		none
+		 *
+		 */
+		public function __construct() {
+		
+			self::$_instance = $this;
+			parent::__construct();
+			
+			// Override the 'auto' value already set as that is based on max_execution_time
+			// which so relevant for exec mode - we are more concerned with timeout like
+			// fcgid iotimeout which we cannot know programmatically - so assume 40s as a
+			// common minimum (so our maximum burst period) and then we reset the burst
+			// threshold period by 'auto' based on the max period we just set - although
+			// the burst threshold period doesn't really come into play here because we are
+			// working by size rather than period.
+			$this->set_burst_max_period( self::ZIP_EXEC_BURST_MAX_PERIOD );
+			$this->set_burst_threshold_period( 'auto' );
+		}
+		
+		/**
+		 *	__destruct()
+		 *	
+		 *	Default destructor.
+		 *	Nullify our own instance and then use the parent destructor.
+		 *	
+		 *	@return		none
+		 *
+		 */
+		public function __destruct() {
+		
+			self::$_instance = NULL;
+			parent::__destruct();
+		
+		}
+	
+		/**
+		 * 
+		 *	get_instance()
+		 *
+		 *	If the object is already created then simply return the instance else
+		 *	create an object and return the instance.
+		 *	Currently only one instance is allowed at a time but currently there is
+		 *	no scenario that would require more than one at any time.
+		 *
+		 *	@return		object					This object instance	
+		 *
+		 */
+		public static function get_instance() {
+		
+			if ( NULL === self::$_instance ) {
+			
+				self::$_instance = new self;
+				
+			}
+		
+			return self::$_instance;
+			
+		}
+		
+		public function get_burst_count() {
+		
+			return $this->_burst_count;
+		}
+		
+		public function get_burst_content_size() {
+		
+			return $this->_burst_content_size;
+		
+		}
+		
+		public function get_burst_content_count() {
+		
+			return $this->_burst_content_count;
+		
+		}
+		
+		/**
+		 * 
+		 *	burst_begin()
+		 *
+		 *	Initializes to begin putting together content for a new burst
+		 *
+		 *	@return		none
+		 *
+		 */
+		public function burst_begin() {
+		
+			$this->_burst_content_size = 0;
+			$this->_burst_content_count = 0;
+			++$this->_burst_count;
+			$this->_burst_content_complete = false;
+			$this->_last_burst_duration = 0;
+			$this->_last_burst_size = 0;
+		
+		}
+		
+		/**
+		 * 
+		 *	burst_end()
+		 *
+		 *	Wrap up after the end of the current burst
+		 *
+		 *	@return		none
+		 *
+		 */
+		public function burst_end() {
+		
+			// Used to make sure we do not report items multiple times
+			// Bit of a kludge for now
+			$this->_reported = false;
+			
+			// Burst is finished - do all those periodic tasks
+			$this->monitor_progress( 1 );
+			$this->monitor_usage();
+			$this->handle_burst_mode();
+			$this->tickle_server();
+		
+		}
+		
+		/**
+		 * 
+		 *	burst_content_added()
+		 *
+		 *	Gives us information on what has just been added to burst content so we
+		 *	can assess the progress against our criteria for completion of the current
+		 *	burst content.
+		 *
+		 *	@param		array		$content	Details about the item just added
+		 *	@return		none
+		 *
+		 */
+		public function burst_content_added( $content ) {
+		
+			// Increment the appropriate count
+			( true === $content[ 'directory' ] ) ? $this->incr_added_dir_count() : $this->incr_added_file_count() ;
+			
+			// Increment the total size of current burst
+			$this->_burst_content_size += (int)$content[ 'size' ];
+			++$this->_burst_content_count;
+			
+			$this->_burst_content_complete = ( $this->get_burst_current_size_threshold() <= $this->_burst_content_size );
+			
+		}
+		
+		/**
+		 * 
+		 *	burst_content_complete()
+		 *
+		 *	Return whether or not we consider the burst content to be complete for the
+		 *	current burst
+		 *
+		 *	@return		bool					True if complete, false otherwise
+		 *
+		 */
+		public function burst_content_complete() {
+		
+			return $this->_burst_content_complete;
+		
+		}
+		
+		/**
+		 * 
+		 *	burst_start()
+		 *
+		 *	Signals that the burst activity is about to be started so we can start to
+		 *	monitor it for the purposes of assessing how it went and how that will impact
+		 *	the next burst
+		 *
+		 *	@return		none
+		 *
+		 */
+		public function burst_start() {
+		
+			$this->set_burst_start_time( time() ); // Note when we started
+		
+		}
+		
+		/**
+		 * 
+		 *	burst_stop()
+		 *
+		 *	Signals that the burst activity has completed so we can stop the monitoring
+		 *	and decide how the next burst is going to go
+		 *
+		 *	Current algorithm is quite simple:
+		 *	Nbt - New Burst Threshold
+		 *	Cbt - Current Burst Threshold
+		 *	Lbd - Last Burst Duration
+		 *	Bdmp - Burst Default Max Period
+		 *	Bdms - Burst Default Max Size
+		 *	
+		 *	Nbt = Cbt + ( Cbt * ( ( Bdmp - Ldb ) / Bdmp ) )
+		 *	
+		 *	Which basically means the longer the burst of the current size threshold takes
+		 *	to complete the smaller the amount by which we increase the burst size threshold.
+		 *	In the extreme, if the size threshold is such that the burst takes longer than we
+		 *	would like then we don't increase the threshold at all - currently we don't reduce
+		 *	it though.
+		 *	The actual burst size will always exceed the threshold because we always
+		 *	add items until the threshold is croseed (rather than not adding an item if the
+		 *	threshold would be crossed). This does mean if we add a large item the threshold
+		 *	could be exceeded by quite a bit, which is probably ok if we have a large threshold
+		 *	but could be a problem if the threshold is low because the server is actually slow.
+		 *	We may have to change the algorithm so that we do not add (or we take back) an item
+		 *	if the threshold would be crossed (unless it is due to a single item entirely in
+		 *	which case we have to add it).
+		 *	We set a maximum burst threshold size and use that as a cap.
+		 *	For a small backup where the server is quite fast we should complete in a few bursts
+		 *	as the threshold will start low but increase quite quickly. For a small backup where
+		 *	the server is slow then the threshold will not increase that much each time so it will
+		 *	take more bursts. For a large backup with a fast server the threshold should increase
+		 *	quickly and then we'll be doing some number of maximumum sized bursts until completion.
+		 *	
+		 *	Example: Suppose a backup content size is 200MB and the server has a disk i/o limit
+		 *	that is low at 1MB/s. We start with a burst threshold of 10MB and we'll be generous
+		 *	and say it takes the server 10s because of that disk i/o limit. The new threshold
+		 *	calculation will be Nbt = 10 + ( 10 * ( ( 40 - 10 ) / 40) ) = 17.5. Because of the
+		 *	disk i/o limit we'll say this next burst will then take 18s, so we'll then get
+		 *	Nbt = 17.5 + ( 17.5 * ( ( 40 - 17.5 ) / 40 ) ) = 27.3, and the next
+		 *	Nbt = 27.3 + ( 27.3 * ( ( 40 - 27.3 ) / 40 ) ) = 36, and the next
+		 *	Nbt = 36 + ( 36 * ( ( 40 - 36 ) / 40 ) ) = 39.6, and the next
+		 *	Nbt = 39.6 + ( 39.6 * ( ( 40 - 39.6 ) / 40 ) ) = 39.996
+		 *	and once those burst were completed we would have processed 170MB of content. You
+		 *	can see that the next burst threshold is actually going to top out at 40MB and that
+		 *	would be the case for all successive burts but in this case the next burts would see
+		 *	the backup completing. What this shows is that the burst size will adapt so that
+		 *	based on the server speed we don't have a burst that is larger than the server
+		 *	should be able to complete within what we have set as Bdmp (=40s in this case). Here,
+		 *	as the limit is the disk i/o the burst threshold approaches 40MB because with a disk
+		 *	i/o of 1MB/s we can never do more than 40MB in a burst. Obviously this is slightly
+		 *	artificial because the 40MB content will be compressed down by some degree _but_ we
+		 *	also have to consider the cpu performance and that we have to read the content as
+		 *	well so it's a reasonable example.
+		 *	If the server were faster then the burst size threshold would increase much faster
+		 *	and likely top out at the maximum we set (currently 100MB)
+		 *
+		 *	@return		none
+		 *
+		 */
+		public function burst_stop() {
+		
+			$last_burst_duration = ( time() - $this->get_burst_start_time() );
+			$last_burst_duration = ( 1 > $last_burst_duration ) ? 1 : $last_burst_duration;
+			
+			// If we took too long then certainly don't increase the burst size (maybe decrease)
+			if ( $this->get_burst_max_period() > $last_burst_duration ) {
+			
+				// Now let's increase the burst content threshold based on the size and duration
+				// of the burst just done but within the constraints of the maximum time and size
+				// that we want
+				$factor = (float)( ( (float)$this->get_burst_max_period() - (float)$last_burst_duration ) / (float)$this->get_burst_max_period() );
+				$this->set_burst_current_size_threshold ( (int)( $this->get_burst_current_size_threshold() + ( (float)$this->get_burst_current_size_threshold() * (float)$factor) ) );
+		
+				// Make sure we don't exceed our desrired burst max size
+				$this->set_burst_current_size_threshold ( ( $this->get_burst_size_max() >= $this->get_burst_current_size_threshold() ) ? $this->get_burst_current_size_threshold() : $this->get_burst_size_max() );
+
+			}
+			
+		}
+	
+	}
+
 	class pluginbuddy_zbzipexec extends pluginbuddy_zbzipcore {
 	
 		// Constants for file handling
 		const ZIP_LOG_FILE_NAME        = 'temp_zip_exec_log.txt';
 		const ZIP_ERRORS_FILE_NAME     = 'last_exec_errors.txt';
 		const ZIP_WARNINGS_FILE_NAME   = 'last_exec_warnings.txt';
+		const ZIP_OTHERS_FILE_NAME     = 'last_exec_others.txt';
+		const ZIP_CONTENT_FILE_NAME    = 'last_exec_list.txt';
 		const ZIP_EXCLUSIONS_FILE_NAME = 'exclusions.txt';
 		const ZIP_INCLUSIONS_FILE_NAME = 'inclusions.txt';
+		const ZIP_TEST_FILE            = '/zbzip.php'; // Contains file test.txt with content "Hello World"
+		const ZIP_TEST_FILE_SIG        = "0a0f9b28c5ff89dfb4f2a0472be0ea8f";
 		
 		// Possible executable path sets
 		const DEFAULT_EXECUTABLE_PATHS = '/usr/local/bin::/usr/bin:/usr/local/sbin:/usr/sbin:/sbin:/bin';
@@ -296,13 +596,16 @@ if ( !class_exists( "pluginbuddy_zbzipexec" ) ) {
 		 *	set_zip_version()
 		 *	
 		 *	This sets the zip version information in the method details
-		 *	Note: pre-v3 zip running "zip -v" will not produce the required output because
+		 *	Use "zip -h" to get a standardized help output that contains the zip version.
+		 *	Theoretically we should be able to use "zip -v" to get zip version and build
+		 *	details but pre-v3 zip running "zip -v" will not produce the required output because
 		 *	there is no tty attached (when running through exec() or equivalent), instead
-		 *	it will produce a zip file.Currently we'll just detect that and set the version
-		 *	as 2.0 and not set the info.
-		 *	TODO: We could parse the zip file to get the version but also considering doing
-		 *	that in the is_available() test where we already created a zip file.
-		 *	TODO: Consider testing if method can zip and only then run the test
+		 *	it will (or should) produce a zip file. However, it has been found that even this
+		 *	is not reliable and some installations just seem to freeze when "zip -v" is run
+		 *	which borks the whole process.
+		 *	So we use "zip -h" first to get the basic zip version information and as a future
+		 *	extension if it is version 3.0+ (3.0 is current and 3.1 hasn't been officially
+		 *	released) we may then run "zip -v" to get the extended version and build information.
 		 *	
 		 *	@param		int		$major		Value to use if none found or override true
 		 *	@param		int		$minor		Value to use if none found or override true
@@ -332,61 +635,57 @@ if ( !class_exists( "pluginbuddy_zbzipexec" ) ) {
 			$zippath = $this->get_command_path( self::COMMAND_ZIP_PATH );
 			
 			// Add the trailing slash if required
-			$command = $this->slashify( $zippath ) . 'zip -v';	
+			$command = $this->slashify( $zippath ) . 'zip -h';
 			@exec( $command, $output, $exitcode );
 			
 			if ( 0 === $exitcode ) {
 			
-				// Should be good output to try at least
-				// If this has a zip file signature then it must be pre-v3 zip
-				$z_data = unpack( 'Vsig', $output[0] );
-			
-				if ( 0x04034b50 == $z_data[ 'sig' ] ) {
-				
-					// TODO: Consider that we could use unzip -Z -v on this file and parse the
-					// output for the Central Dir info on what version of zip created the file.
-					// Currently, where this function is called, we don't know if we have unzip
-					// so we can't assume - with a rejig we could call this later and use unzip
-					// if available.
-					// Can't tell which 2.X version, cannot populate $info
-					$major = 2;
-					$minor = 0;
+				// Expect format like: Zip 3.0 (July 5th 2008)...
+				//                     Zip 3.1c BETA (June 22nd 2010)...
+				// The match should take only the major/minor digits and ignore any following alpha
+				// May extend to capture the alpha and also whether BETA indicated but not currently
+				// required.
+				foreach ( $output as $line ) {
+
+					if ( preg_match( '/^\s*(zip)\s+(?P<major>\d)\.(?P<minor>\d+)/i', $line, $matches ) ) {
 					
-				} else {
-				
-					// Doesn't appear to be a zip file so should be version info
-					// Expect format like: This is Zip 3.0 (July 5th 2008)...
-					//                     This is Zip 3.1c BETA (June 22nd 2010)...
-					// The match should take only the major/minor digits and ignore any following alpha
-					// May extend to capture the alpha and also whether BETA indicated but not currently
-					// required.
-					foreach ( $output as $line ) {
-	
-						if ( preg_match( '/^\s*(this)\s+(is)\s+(zip)\s+(?P<major>\d)\.(?P<minor>\d+)/i', $line, $matches ) ) {
-						
-							$major = (int)$matches[ 'major' ];
-							$minor = (int)$matches[ 'minor' ];
-							break;
-						
-						}
-					
-					}
-					
-					// If we didn't match a version then suspect this is still not valid version info
-					if ( !empty( $matches ) ) {
-					
-						// Now create the info string
-						// Note: not worth compressing as that gives a larger string after converting
-						// from binary to hex format for saving
-						$info = implode( PHP_EOL, $output );
-						$this->_method_details[ 'param' ][ 'zip' ][ 'info' ] = $info;
+						$major = (int)$matches[ 'major' ];
+						$minor = (int)$matches[ 'minor' ];
+						break;
 					
 					}
 				
 				}
 				
-			}
+				// If we didn't match a version then suspect this is still not valid version info
+// 				if ( !empty( $matches ) ) {
+// 				
+// 					// We did match a version so check if we have a chance of getting additional information
+// 					if ( 3 === $major ) {
+// 					
+// 						$exitcode = 127;
+// 						$output = array();
+// 					
+// 						// Add the trailing slash if required
+// 						$command = $this->slashify( $zippath ) . 'zip -v';
+// 						@exec( $command, $output, $exitcode );
+// 						
+// 						if ( 0 === $exitcode ) {
+// 				
+// 							// Now create the info string
+// 							// Note: not worth compressing as that gives a larger string after converting
+// 							// from binary to hex format for saving
+// 							$info = implode( PHP_EOL, $output );
+// 							$this->_method_details[ 'param' ][ 'zip' ][ 'info' ] = $info;
+// 						
+// 						}
+// 					
+// 					}
+// 				
+// 				}
 			
+			}
+
 			// Now use either what we got or what we were given...
 			if ( ( is_int( $major) ) && ( 0 < $major ) && ( is_int( $minor ) ) ) {
 			
@@ -607,7 +906,7 @@ if ( !class_exists( "pluginbuddy_zbzipexec" ) ) {
 					// Make sure it is clean of leading/trailing whitespace
 					$path = trim( array_shift( $candidate_paths ) );
 					
-					pb_backupbuddy::status( 'details', __( 'Trying executable path for zip:','it-l10n-backupbuddy' ) . ' `' . $path . '`.' );
+					pb_backupbuddy::status( 'details', __( 'Exec test (zip) trying executable path:','it-l10n-backupbuddy' ) . ' `' . $path . '`.' );
 
 					$test_file = $tempdir . 'temp_test_' . uniqid() . '.zip';
 					
@@ -660,7 +959,7 @@ if ( !class_exists( "pluginbuddy_zbzipexec" ) ) {
 						
 						}
 						
-						if ( 0 === $exec_exit_code ) {
+						if ( 0 !== $exec_exit_code ) {
 						
 							$error_string = $exec_exit_code;
 							pb_backupbuddy::status( 'details', __('Exec test (zip) FAILED: exec Exit Code: ','it-l10n-backupbuddy' ) . $error_string );
@@ -684,10 +983,11 @@ if ( !class_exists( "pluginbuddy_zbzipexec" ) ) {
 					
 				}
 				
+				
 				// If we didn't find zip anywhere (or maybe found it but it failed) then log it
 				if ( false === $found_zip ) {
 					
-					pb_backupbuddy::status( 'details', __('Exec test Failed: Unable to find zip executable on any specified path.','it-l10n-backupbuddy' ) );
+					pb_backupbuddy::status( 'details', __('Exec test (zip) FAILED: Unable to find zip executable on any specified path.','it-l10n-backupbuddy' ) );
 					$result = false;
 					
 				}
@@ -699,9 +999,24 @@ if ( !class_exists( "pluginbuddy_zbzipexec" ) ) {
 				// See if we can determine zip version and possibly available options. This can help us
 				// determine how to execute operations such as creating a zip file
 				if ( true === $found_zip ) {
-				
+					
+					pb_backupbuddy::status( 'details', 'Checking zip version...' );
+
 					$this->set_zip_version();
+					
+					$version = $this->get_zip_version();
+					if ( true === is_array( $version ) ) {
+			
+						( ( 2 == $version[ 'major' ] ) && ( 0 == $version[ 'minor' ] ) ) ? $version[ 'minor' ] = 'X' : true ;
+						pb_backupbuddy::status( 'details', sprintf( __( 'Found zip version: %1$s.%2$s', 'it-l10n-backupbuddy' ), $version[ 'major' ], $version[ 'minor' ] ) );
 				
+					} else {
+			
+						$version = array( "major" => "X", "minor" => "Y" );
+						pb_backupbuddy::status( 'details', sprintf( __( 'Found zip version: %1$s.%2$s', 'it-l10n-backupbuddy' ), $version[ 'major' ], $version[ 'minor' ] ) );
+
+					}
+
 				}
 				
 				// Reset the candidate paths for a full search for unzip
@@ -713,81 +1028,90 @@ if ( !class_exists( "pluginbuddy_zbzipexec" ) ) {
 				// New search
 				$found_zip = false;
 				
-				// Need to create a test zip file - here's one I prepared earlier
-				// containing the one file test.txt (with content "Hello World")
-				// Can use this for all case tests and delete at end
-				$test_file = $tempdir . 'temp_test_' . uniqid() . '.zip';
-				@file_put_contents( $test_file, base64_decode( "UEsDBAoAAAAAAC8ELUHj5ZWwDAAAAAwAAAAIABwAdGVzdC50eHRVVAkAA8obUVDjG1FQdXgLAAEE+AEAAAQUAAAASGVsbG8gV29ybGQKUEsBAh4DCgAAAAAALwQtQePllbAMAAAADAAAAAgAGAAAAAAAAQAAAKSBAAAAAHRlc3QudHh0VVQFAAPKG1FQdXgLAAEE+AEAAAQUAAAAUEsFBgAAAAABAAEATgAAAE4AAAAAAA==" ) );
-
-				// We are searching for unzip using the list of possible paths
-				while ( ( false === $found_zip ) && ( !empty( $candidate_paths ) ) ) {
+				// Using a test file
+				$test_file = dirname( __FILE__ ) . self::ZIP_TEST_FILE;
 				
-					// Make sure it is clean of leading/trailing whitespace
-					$path = trim( array_shift( $candidate_paths ) );
+				// It has to exist and be readable otehrwise we just have to bail on testing for unzip
+				pb_backupbuddy::status( 'details', sprintf( __( 'Exec test (unzip) checking test file readable: %1$s', 'it-l10n-backupbuddy' ), $test_file ) );
+				if ( is_readable( $test_file ) ) {
+				
+					// Only proceed if the file looks as expected
+					pb_backupbuddy::status( 'details', sprintf( __( 'Exec test (unzip) checking test file intact: %1$s', 'it-l10n-backupbuddy' ), self::ZIP_TEST_FILE_SIG ) );
+					if ( self::ZIP_TEST_FILE_SIG === md5_file( $test_file ) ) {
+				
+						// We are searching for unzip using the list of possible paths
+						while ( ( false === $found_zip ) && ( !empty( $candidate_paths ) ) ) {
+				
+							// Make sure it is clean of leading/trailing whitespace
+							$path = trim( array_shift( $candidate_paths ) );
 					
-					pb_backupbuddy::status( 'details', __( 'Trying executable path for unzip:','it-l10n-backupbuddy' ) . ' `' . $path . '`.' );
+							pb_backupbuddy::status( 'details', __( 'Exec test (unzip) trying executable path:','it-l10n-backupbuddy' ) . ' `' . $path . '`.' );
 
-					$command = $this->slashify( $path ) . 'unzip -qt' . " '{$test_file}'" . " 'test.txt'";
+							$command = $this->slashify( $path ) . 'unzip -qt' . " '{$test_file}'" . " 'test.txt'";
 									
-					$command = ( self::OS_TYPE_WIN === $this->get_os_type() ) ? str_replace( '\'', '"', $command ) : $command;
+							$command = ( self::OS_TYPE_WIN === $this->get_os_type() ) ? str_replace( '\'', '"', $command ) : $command;
 					
-					@exec( $command, $exec_output, $exec_exit_code );
+							@exec( $command, $exec_output, $exec_exit_code );
 					
-					if ( $exec_exit_code === 0 ) {
+							if ( $exec_exit_code === 0 ) {
 							
-						// Set the parameter to be remembered (note: path without trailing slash)
-						$this->_method_details[ 'param' ][ 'unzip' ][ 'path' ] = $path;
+								// Set the parameter to be remembered (note: path without trailing slash)
+								$this->_method_details[ 'param' ][ 'unzip' ][ 'path' ] = $path;
 						
-						// Platform independent capabilities
-						$this->_method_details[ 'attr' ][ 'is_unzipper' ] = true;
-						$this->_method_details[ 'attr' ][ 'is_checker' ] = true;
-						$this->_method_details[ 'attr' ][ 'is_unarchiver' ] = true;
-						$this->_method_details[ 'attr' ][ 'is_lister' ] = true;
+								// Platform independent capabilities
+								$this->_method_details[ 'attr' ][ 'is_unzipper' ] = true;
+								$this->_method_details[ 'attr' ][ 'is_checker' ] = true;
+								$this->_method_details[ 'attr' ][ 'is_unarchiver' ] = true;
+								$this->_method_details[ 'attr' ][ 'is_lister' ] = true;
+								$this->_method_details[ 'attr' ][ 'is_extractor' ] = true;
 						
-						// Platform specific capabilities
-						switch ( $this->get_os_type() ) {
-							case self::OS_TYPE_NIX:
+								// Platform specific capabilities
+								switch ( $this->get_os_type() ) {
+									case self::OS_TYPE_NIX:
 								
-								// This is special - we must have zip also so this will only end up true if we previously found zip
-								// and speculatively set this attribute to be true. Also we need for exec_dir to not be active - if
-								// it is the command line is escaped and that is incompatible with the piping we have to use when
-								// setting a comment. Also we need the escapeshellarg function to be available and that was checked
-								// when dependencies were checked
-								$this->_method_details[ 'attr' ][ 'is_commenter' ] = $this->_method_details[ 'attr' ][ 'is_commenter' ] && true && !$this->get_exec_dir_flag() && self::$_allow_is_commenter;
-								break;
-							case self::OS_TYPE_WIN:
-								// None Applicable
-								break;
-							default:
-								// There is no default
-						}
+										// This is special - we must have zip also so this will only end up true if we previously found zip
+										// and speculatively set this attribute to be true. Also we need for exec_dir to not be active - if
+										// it is the command line is escaped and that is incompatible with the piping we have to use when
+										// setting a comment. Also we need the escapeshellarg function to be available and that was checked
+										// when dependencies were checked
+										$this->_method_details[ 'attr' ][ 'is_commenter' ] = $this->_method_details[ 'attr' ][ 'is_commenter' ] && true && !$this->get_exec_dir_flag() && self::$_allow_is_commenter;
+										break;
+									case self::OS_TYPE_WIN:
+										// None Applicable
+										break;
+									default:
+										// There is no default
+								}
 						
-						pb_backupbuddy::status( 'details', __('Exec test (unzip) PASSED.','it-l10n-backupbuddy' ) );
-						$result = true;
+								pb_backupbuddy::status( 'details', __('Exec test (unzip) PASSED.','it-l10n-backupbuddy' ) );
+								$result = true;
 				
-						// This will break us out of the loop
-						$found_zip = true;
+								// This will break us out of the loop
+								$found_zip = true;
 						
+							} else {
+				
+								$error_string = $exec_exit_code;
+								pb_backupbuddy::status( 'details', __('Exec test (unzip) FAILED: Test unzip file test failed.','it-l10n-backupbuddy' ) );
+								pb_backupbuddy::status( 'details', __('Exec test (unzip) FAILED: exec Exit Code: ','it-l10n-backupbuddy' ) . $error_string );
+								$result = false;
+				
+							}
+					
+						}
+					
 					} else {
 				
-						$error_string = $exec_exit_code;
-						pb_backupbuddy::status( 'details', __('Exec test (unzip) FAILED: Test unzip file test failed.','it-l10n-backupbuddy' ) );
-						pb_backupbuddy::status( 'details', __('Exec test (unzip) FAILED: exec Exit Code: ','it-l10n-backupbuddy' ) . $error_string );
-						$result = false;
-				
+						// The test file looked corrupted so warn and bail out
+						pb_backupbuddy::status( 'details', sprintf( __('Exec test (unzip) FAILED: Test file appears to be corrupted: %1$s','it-l10n-backupbuddy' ), md5_file( $test_file ) ) );
+
 					}
-					
-				}
 				
-				// Remove the test zip file if it was created
-				if ( @file_exists( $test_file ) ) {
+				} else {
 				
-					if ( !@unlink( $test_file ) ) {
-			
-						pb_backupbuddy::status( 'details', sprintf( __('Exec test (unzip) unable to delete test file (%s)','it-l10n-backupbuddy' ), $test_file ) );
+					// The test file doesn't seem to exist or be readable so warn and bail out
+					pb_backupbuddy::status( 'details', __('Exec test (unzip) FAILED: Test file appears to either not exist or not be readable.','it-l10n-backupbuddy' ) );
 				
-					}
-			
 				}
 			
 				// If we didn't find unzip anywhere (or maybe found it but it failed) then log it
@@ -796,7 +1120,7 @@ if ( !class_exists( "pluginbuddy_zbzipexec" ) ) {
 					// We speculatively set this true when we found zip but we need both zip and unzip so set if false
 					$this->_method_details[ 'attr' ][ 'is_commenter' ] = false;
 
-					pb_backupbuddy::status( 'details', __('Exec test Failed: Unable to find unzip executable on any specified path.','it-l10n-backupbuddy' ) );
+					pb_backupbuddy::status( 'details', __('Exec test (unzip) FAILED: Unable to find unzip executable on any specified path.','it-l10n-backupbuddy' ) );
 					$result = false;
 					
 				} else {
@@ -804,13 +1128,27 @@ if ( !class_exists( "pluginbuddy_zbzipexec" ) ) {
 					// See if we can determine unzip version and possibly available options. This can help us
 					// determine how to execute operations such as unzipping a file
 					
+					pb_backupbuddy::status( 'details', 'Checking unzip version...' );
+
 					$this->set_unzip_version();
 				
+					$version = $this->get_unzip_version();
+					if ( true === is_array( $version ) ) {
+			
+						pb_backupbuddy::status( 'details', sprintf( __( 'Found unzip version: %1$s.%2$s', 'it-l10n-backupbuddy' ), $version[ 'major' ], $version[ 'minor' ] ) );
+				
+					} else {
+			
+						$version = array( "major" => "X", "minor" => "Y" );
+						pb_backupbuddy::status( 'details', sprintf( __( 'Found unzip version: %1$s.%2$s', 'it-l10n-backupbuddy' ), $version[ 'major' ], $version[ 'minor' ] ) );
+
+					}
+
 				}
 				
 			} else {
 			
-				pb_backupbuddy::status( 'details', __('Exec test FAILED: One or more required function do not exist.','it-l10n-backupbuddy' ) );
+				pb_backupbuddy::status( 'details', __('Exec test (zip/unzip) FAILED: One or more required function do not exist.','it-l10n-backupbuddy' ) );
 				$result = false;
 		  
 		  	}
@@ -882,13 +1220,12 @@ if ( !class_exists( "pluginbuddy_zbzipexec" ) ) {
 		 *	@param		string	$dir			Full path of directory to add to ZIP Archive file
 		 *	@parame		array	$excludes		List of either absolute path exclusions or relative exclusions
 		 *	@param		string	$tempdir		[Optional] Full path of directory for temporary usage
-		 *	@param		object	$listmaker		The object from which we can get an inclusions list
 		 *	@return		bool					True if the creation was successful, false otherwise
 		 *
 		 */
-		protected function create_generic( $zip, $dir, $excludes, $tempdir, $listmaker ) {
+		protected function create_generic( $zip, $dir, $excludes, $tempdir ) {
 		
-			$exitcode = 0;
+			$exitcode = 255;
 			$output = array();
 			$zippath = '';
 			$command = '';
@@ -911,19 +1248,41 @@ if ( !class_exists( "pluginbuddy_zbzipexec" ) ) {
 			$have_zip_other = false;
 			$zip_other_count = 0;
 			$zip_other = array();
+			$zip_skipped_count = 0;
 			$zip_using_log_file = false;
 			$logfile_name = '';
 			$zip_ignoring_symlinks = false;
+
+			$zh = NULL;
+			$lister = NULL;
+			$visitor = NULL;
+			$total_size = 0;
+			$the_list = array();
 		
-			// The basedir must have a trailing directory separator
-			$basedir = ( rtrim( trim( $dir ), DIRECTORY_SEPARATOR ) ) . DIRECTORY_SEPARATOR;
+			// The basedir must have a trailing normalized directory separator
+			$basedir = ( rtrim( trim( $dir ), self::DIRECTORY_SEPARATORS ) ) . self::NORM_DIRECTORY_SEPARATOR;
 			
-			if ( empty( $tempdir ) || !@file_exists( $tempdir ) ) {
+			// Normalize platform specific directory separators in path
+			$basedir = str_replace( DIRECTORY_SEPARATOR, self::NORM_DIRECTORY_SEPARATOR, $basedir );
+
+			// Ensure no stale file information
+			clearstatcache();
 			
+			// Create the helper function here so we can use it outside of the post-add
+			// function. Using all defaults so includes multi-burst and server tickling
+			// for now but with options we can modify this.				
+			$zh = new pb_backupbuddy_exec_helper();
+				
+			// Note: could enforce trailing directory separator for robustness
+			if ( empty( $tempdir ) || !file_exists( $tempdir ) ) {
+			
+				// This breaks the rule of single point of exit (at end) but it's early enough to not be a problem
 				pb_backupbuddy::status( 'details', __('Temporary working directory must be available.','it-l10n-backupbuddy' ) );				
 				return false;
 				
 			}
+			
+			pb_backupbuddy::status( 'message', __('Using Exec Mode.','it-l10n-backupbuddy' ) );
 			
 			// Tell which zip version is being used
 			$version = $this->get_zip_version();
@@ -951,505 +1310,779 @@ if ( !class_exists( "pluginbuddy_zbzipexec" ) ) {
 			}
 
 			// Add the trailing slash if required
-			$command = $this->slashify( $zippath ) . 'zip';	
-
-			// Always do recursive operation
-			$command .= ' -r';
+			$command = $this->slashify( $zippath ) . 'zip';
 			
-			// Check if the version of zip in use supports log file (which will help with memory usage for large sites)
-			if ( true === $this->get_zip_supports_log_file() ) {
+			// Let's inform what we are excluding/including
+			if ( count( $excludes ) > 0 ) {
 			
-				// Choose to use log file so quieten stdout - we'll set up the log file later
-				$command .= ' -q';
-				$zip_using_log_file = true;
-			
-			}
-			
-			// Check if we need to turn off compression by settings (faster but larger backup)
-			if ( true !== $this->get_compression() ) {
-			
-				$command .= ' -0';
-				pb_backupbuddy::status( 'details', __('Zip archive creation compression disabled based on settings.','it-l10n-backupbuddy' ) );
+				pb_backupbuddy::status( 'details', __('Calculating directories/files to exclude from backup (relative to site root).','it-l10n-backupbuddy' ) );
 				
-			} else {
-			
-				pb_backupbuddy::status( 'details', __('Zip archive creation compression enabled based on settings.','it-l10n-backupbuddy' ) );
-			
-			}
-			
-			// Check if ignoring (not following) symlinks
-			if ( true === $this->get_ignore_symlinks() ) {
-			
-				// Not all OS support this for command line zip but best to handle it late and just
-				// indicate here it is requested but not supported by OS
-				switch ( $this->get_os_type() ) {
-					case self::OS_TYPE_NIX:
-						// Want to not follow symlinks so set command option and set flag for later use
-						$command .= ' -y';
-						$zip_ignoring_symlinks = true;
-						pb_backupbuddy::status( 'details', __('Zip archive creation symbolic links will not be followed based on settings.','it-l10n-backupbuddy' ) );
-						break;
-					case self::OS_TYPE_WIN:
-						pb_backupbuddy::status( 'details', __('Zip archive creation symbolic links requested to not be followed based on settings but this option is not supported on this operating system.','it-l10n-backupbuddy' ) );
-						break;
-					default:
-						pb_backupbuddy::status( 'details', __('Zip archive creation symbolic links requested to not be followed based on settings but this option is not supported on this operating system.','it-l10n-backupbuddy' ) );
-				}
+				foreach ( $excludes as $exclude ) {
 				
-			} else {
-			
-				pb_backupbuddy::status( 'details', __('Zip archive creation symbolic links will be followed based on settings.','it-l10n-backupbuddy' ) );
+					if ( !strstr( $exclude, 'backupbuddy_backups' ) ) {
 
-			}
-			
-			// Check if we are ignoring warnings - meaning can still get a backup even
-			// if, e.g., some files cannot be read
-			if ( true === $this->get_ignore_warnings() ) {
-			
-				// Note: warnings are being ignored but will still be gathered and logged
-				pb_backupbuddy::status( 'details', __('Zip archive creation warnings will be ignored based on settings.','it-l10n-backupbuddy' ) );
-				
-			} else {
-			
-				pb_backupbuddy::status( 'details', __('Zip archive creation warnings will not be ignored based on settings.','it-l10n-backupbuddy' ) );
-
-			}
-			
-			// Delete any existing zip file of same name - really this should never happen
-			if ( @file_exists( $zip ) ) {
-
-				pb_backupbuddy::status( 'details', __('Existing ZIP Archive file will be replaced.','it-l10n-backupbuddy' ) );
-				@unlink( $zip );
-
-			}
-			
-			// Now we'll set up the logging to file if required - use full logging
-			if ( true === $zip_using_log_file ) {
-			
-				$logfile_name = $tempdir . self::ZIP_LOG_FILE_NAME;
-				$command .= " -lf '{$logfile_name}' -li";
-			
-			}
+						// Set variable to show we are excluding additional directories besides backup dir.
+						$excluding_additional = true;
+							
+					}
 						
-			// Set temporary directory to store ZIP while it's being generated.			
-			$command .= " -b '{$tempdir}'";
-
-			// Specify where to place the finalized zip archive file
-			// If warnings are being ignored we can tell zip to create the zip archive in the final
-			// location - otherwise we must put it in a temporary location and move it later only
-			// if there are no warnings. This copes with the case where (this) controlling script
-			// gets timed out by the server and if the file were created in the final location with
-			// warnings that should not be ignored we cannot prevent it being created. The -MM option
-			// could be used but this prevents us catching such warnings and being able to report
-			// them to the user in the case where the script hasn't been terminated. Additionally the
-			// -MM option would bail out on the first encountered problem and so if there were a few
-			// problems they would each not be found until the current one is fixed and try again.
-			if ( true === $this->get_ignore_warnings() ) {
-			
-				$temp_zip = $zip;
-			
-			} else {
-			
-				$temp_zip = $tempdir . basename( $zip );
-				
-			}		
-
-			$command .= " '{$temp_zip}' .";
-			
-			// Now work out exclusions dependent on what we have been given
-			if ( is_object( $listmaker ) && ( defined( 'USE_EXPERIMENTAL_ZIPBUDDY_INCLUSION' ) && ( true === USE_EXPERIMENTAL_ZIPBUDDY_INCLUSION ) ) ) {
-			
-				// We're doing an inclusion operation, but first we'll just show the exclusiosn
-				
-				// For zip we need relative rather than absolute exclusion spaths
-				$exclusions = $listmaker->get_relative_excludes( $basedir );
-				
-				if ( count( $exclusions ) > 0 ) {
-				
-					pb_backupbuddy::status( 'details', __('Calculating directories to exclude from backup.','it-l10n-backupbuddy' ) );
+					pb_backupbuddy::status( 'details', __('Excluding','it-l10n-backupbuddy' ) . ': ' . $exclude );
 					
-					$excluding_additional = false;
-					$exclude_count = 0;
-					foreach ( $exclusions as $exclude ) {
-					
-						if ( !strstr( $exclude, 'backupbuddy_backups' ) ) { // Set variable to show we are excluding additional directories besides backup dir.
-	
-							$excluding_additional = true;
-								
-						}
-							
-						pb_backupbuddy::status( 'details', __('Excluding','it-l10n-backupbuddy' ) . ': ' . $exclude );
-													
-						$exclude_count++;
-							
-					}
-										
+					$exclude_count++;
+						
 				}
 				
-				// Get the list of inclusions to process
-				$inclusions = $listmaker->get_terminals();
-				
-				// For each directory we need to put the "wildcard" on the end
-				foreach ( $inclusions as &$inclusion ) {
-				
-					if ( is_dir( $inclusion ) ) {
-					
-						$inclusion .= DIRECTORY_SEPARATOR . "*";
-					}
-				
-					// Remove directory path prefix excluding leading slash to make relative (needed for zip)
-					$inclusion = str_replace( rtrim( $basedir, DIRECTORY_SEPARATOR ), '', $inclusion );
-									
-				}
-				
-				// Now create the inclusions file in the tempdir
-				
-				// And update the command options
-				$ifile = $tempdir . self::ZIP_INCLUSIONS_FILE_NAME;
-				if ( file_exists( $ifile ) ) {
-				
-					@unlink( $ifile );
-				
-				}
-				
-				file_put_contents( $ifile, implode( PHP_EOL, $inclusions ) . PHP_EOL . PHP_EOL );
-				
-				$command .= " -i@" . "'{$ifile}'";
-			
-			} else {
-			
-				// We're doing an exclusion operation
-			
-				//$command .= "-i '*' "; // Not needed. Zip defaults to doing this. Removed July 10, 2012 for v3.0.41.
-				
-				// Since we had no $listmaker object or not using it get the standard relative excludes to process
-				$exclusions = $excludes;
-				
-				if ( count( $exclusions ) > 0 ) {
-				
-					// Handle exclusions by placing them in an exclusion text file.
-					$exclusion_file = $tempdir . self::ZIP_EXCLUSIONS_FILE_NAME;
-					$this->_render_exclusions_file( $exclusion_file, $exclusions );
-					
-					pb_backupbuddy::status( 'details', sprintf( __( 'Using exclusion file `%1$s`', 'it-l10n-backupbuddy' ), $exclusion_file ) );
-					$command .= ' -x@' . "'{$exclusion_file}'";
-										
-				}
-			
 			}
 			
-			// If we can't use a log file but exec_dir isn't in use we can redirect stderr to stdout
-			// If exec_dir is in use we cannot redirect because of command line escaping so cannot log errors/warnings
-			if ( false === $zip_using_log_file ) {
+			if ( true === $excluding_additional ) {
 			
-				if ( false === $this->get_exec_dir_flag() ) {
+				pb_backupbuddy::status( 'message', __( 'Excluding archives directory and additional directories defined in settings.','it-l10n-backupbuddy' ) . ' ' . $exclude_count . ' ' . __( 'total','it-l10n-backupbuddy' ) . '.' );
+				
+			} else {
 			
-					$command .= ' 2>&1';
+				pb_backupbuddy::status( 'message', __( 'Only excluding archives directory based on settings.','it-l10n-backupbuddy' ) . ' ' . $exclude_count . ' ' . __( 'total','it-l10n-backupbuddy' ) . '.' );
+				
+			}
+
+			pb_backupbuddy::status( 'message', __( 'Zip process reported: Determining list of file + directories to be added to the zip archive','it-l10n-backupbuddy' ) );
+
+			// Now let's create the list of files and empty (vacant) directories to include in the backup.
+			// Note: we can only include vacant directories (those that had no content in the first place).
+			// An empty directory may have had content that was excluded but if we give this directory to
+			// pclzip it automatically recurses down into it (we have no control over that) which would then
+			// mess up the exclusions.
+			
+			$visitor = new pluginbuddy_zbdir_visitor_details();
+			
+			$options = array( 'exclusions' => $excludes,
+							  'pattern_exclusions' => array(),
+							  'inclusions' => array(),
+							  'pattern_inclusions' => array(),
+							  'keep_tree' => false,
+							  'ignore_symlinks' => $this->get_ignore_symlinks(),
+							  'visitor' => $visitor );
+			
+			try {
+			
+				$lister = new pluginbuddy_zbdir( $basedir, $options );
+				$result = true;
+				
+				pb_backupbuddy::status( 'message', __( 'Zip process reported: Determined list of file + directories to be added to the zip archive','it-l10n-backupbuddy' ) );
+
+			} catch (Exception $e) {
+			
+				// We couldn't build the list as required so need to bail
+				$error_string = $e->getMessage();
+				pb_backupbuddy::status( 'details', sprintf( __('Zip process reported: Unable to determine list of files + directories for backup - error reported: %1$s','it-l10n-backupbuddy' ), $error_string ) );
+
+				// TODO: Should do some cleanup of any temporary directory, visitor, etc. but not for now
+				$result = false;
+				
+			}
+			
+			// In case that took a while use the helper to try and keep the process alive
+			// Calling burst_end() here as a kludge for now
+			$zh->burst_end();
+
+			if ( true === $result ) {	
+					
+				// Now we have our flat file/directory list from the visitor - remember we didn't
+				// keep the tree as we shouldn't need it for anything else as we can get all we need
+				// from the visitor. We'll get a list of the subset of things we need from the visitor
+				// so we can get rid of the visitor later. We'll use this list later to create our
+				// partial inclusion list files to feed to zip for each burst.
+				$the_list = $visitor->get_as_array( array( 'filename', 'directory', 'vacant', 'relative_path', 'size' ) );
+
+				// Need to remove empty values now so that we don't get misleading values
+				// Here "empty value" means there is no actual path that zip would be able to
+				// add and so this would have had to have been ignored later and if we counted
+				// it as "vaid" now then numebrs would be awry. In this case it is probably
+				// _only_ the entry that would be for the / directory which actually has a
+				// empty relative path and filename.
+				foreach( $the_list as $key => $value ) {
+					if ( empty( $value[ 'relative_path' ] ) && empty( $value[ 'filename' ] ) ) {
+						unset( $the_list[ $key ] );
+					}
+				}
+				
+				pb_backupbuddy::status( 'details', sprintf( __('Zip process reported: %1$s (directories + files) will be requested to be added to backup zip archive','it-l10n-backupbuddy' ), count( $the_list ) ) );
+				//$zh->set_options( array( 'directory_count' => ( $visitor->count( 'directory' => true ), 'file_count' => $visitor->count( array( 'directory' => false ) ) ) );
+				
+				$size_list = $visitor->get_as_array( array( 'directory', 'size' ) );
+				$total_size = 0;
+				foreach ( $size_list as $size_item ) {
+					if ( false === $size_item[ 'directory' ] ) {
+						$total_size += (int)$size_item[ 'size' ];
+					}
+				}
+				
+				unset( $size_list );
+				
+				pb_backupbuddy::status( 'details', sprintf( __('Zip process reported: %1$s bytes will be requested to be added to backup zip archive','it-l10n-backupbuddy' ), $total_size ) );
+				//$zh->set_options( array( 'content_size' => $total_size ) );
+
+				// Retain this for reference for now
+// 				file_put_contents( ( dirname( $tempdir ) . DIRECTORY_SEPARATOR . self::ZIP_CONTENT_FILE_NAME ), print_r( $the_list, true ) );
+			
+				// Presently we don't need the visitor any longer so we can free up some
+				// memory by deleting
+				unset( $visitor );
+		
+			}
+			
+			// Only continue if we have a valid list
+			// This isn't ideal at present but will suffice
+			if ( true === $result ) {			
+			
+				// Check if the version of zip in use supports log file (which will help with memory usage for large sites)
+				if ( true === $this->get_zip_supports_log_file() ) {
+			
+					// Choose to use log file so quieten stdout - we'll set up the log file later
+					$command .= ' -q';
+					$zip_using_log_file = true;
+			
+				}
+			
+				// Check if we need to turn off compression by settings (faster but larger backup)
+				if ( true !== $this->get_compression() ) {
+			
+					$command .= ' -0';
+					pb_backupbuddy::status( 'details', __('Zip archive creation compression disabled based on settings.','it-l10n-backupbuddy' ) );
+				
+				} else {
+			
+					pb_backupbuddy::status( 'details', __('Zip archive creation compression enabled based on settings.','it-l10n-backupbuddy' ) );
+			
+				}
+			
+				// Check if ignoring (not following) symlinks
+				if ( true === $this->get_ignore_symlinks() ) {
+			
+					// Not all OS support this for command line zip but best to handle it late and just
+					// indicate here it is requested but not supported by OS
+					switch ( $this->get_os_type() ) {
+						case self::OS_TYPE_NIX:
+							// Want to not follow symlinks so set command option and set flag for later use
+							$command .= ' -y';
+							$zip_ignoring_symlinks = true;
+							pb_backupbuddy::status( 'details', __('Zip archive creation symbolic links will not be followed based on settings.','it-l10n-backupbuddy' ) );
+							break;
+						case self::OS_TYPE_WIN:
+							pb_backupbuddy::status( 'details', __('Zip archive creation symbolic links requested to not be followed based on settings but this option is not supported on this operating system.','it-l10n-backupbuddy' ) );
+							break;
+						default:
+							pb_backupbuddy::status( 'details', __('Zip archive creation symbolic links requested to not be followed based on settings but this option is not supported on this operating system.','it-l10n-backupbuddy' ) );
+					}
+				
+				} else {
+			
+					pb_backupbuddy::status( 'details', __('Zip archive creation symbolic links will be followed based on settings.','it-l10n-backupbuddy' ) );
+
+				}
+			
+				// Check if we are ignoring warnings - meaning can still get a backup even
+				// if, e.g., some files cannot be read
+				if ( true === $this->get_ignore_warnings() ) {
+			
+					// Note: warnings are being ignored but will still be gathered and logged
+					pb_backupbuddy::status( 'details', __('Zip archive creation actionable warnings will be ignored based on settings.','it-l10n-backupbuddy' ) );
+				
+				} else {
+			
+					pb_backupbuddy::status( 'details', __('Zip archive creation actionable warnings will not be ignored based on settings.','it-l10n-backupbuddy' ) );
+
+				}
+				
+				// We want to "grow" a file with each successive "burst" after the first. If the zip
+				// file doesn't exist when -g is given it will be created - but the problem is that
+				// zip also throws a warning and if we are not ignoring warnings we get caught on this.
+				// We could filter out this warning but that would be fiddly - so instead let's we'll
+				// need to be able to switch the option off/on somehow. We could have two copies of
+				// teh command string, one with and one without, but that is a bit messy. Or we could
+				// have the command in two parts that we splice together (also messy). We could append
+				// it when we need it but that might not be compatible with the specific form of the
+				// command in all cases. We could put it in and then on the first call use a filtered
+				// command string without it. We could have a separate command "object" that we use
+				// to build the command each time we want it and we can turn the option on/off.
+				// All of these are possible but which is simplest?
+				$command .= ' -g';
+			
+				// Now we'll set up the logging to file if required - use full logging
+				// If using log file we want to append to any existing on each burst.
+				// In the case where not using a log file we get the output in any array
+				// and we'll simply accumulate the arrays for each burst. When complete
+				// we process the whole log file or the aggrgate array - this is simpler
+				// than trying to process results as we go.
+				if ( true === $zip_using_log_file ) {
+			
+					$logfile_name = $tempdir . self::ZIP_LOG_FILE_NAME;
+					$command .= " -lf '{$logfile_name}' -li -la";
+			
+				}
+						
+				// Set temporary directory to store ZIP while it's being generated.			
+				$command .= " -b '{$tempdir}'";
+
+				// Specify where to place the finalized zip archive file
+				// If warnings are being ignored we can tell zip to create the zip archive in the final
+				// location - otherwise we must put it in a temporary location and move it later only
+				// if there are no warnings. This copes with the case where (this) controlling script
+				// gets timed out by the server and if the file were created in the final location with
+				// warnings that should not be ignored we cannot prevent it being created. The -MM option
+				// could be used but this prevents us catching such warnings and being able to report
+				// them to the user in the case where the script hasn't been terminated. Additionally the
+				// -MM option would bail out on the first encountered problem and so if there were a few
+				// problems they would each not be found until the current one is fixed and try again.
+				// TODO: This will have to change when we start to use burst modes properly because we
+				// have to keep the zip file in the temporary directory after each burst has grown it
+				// and we can only move it to teh final location when complete. This is much like pclzip
+				// works anyway and this mode for exec was never actually a design feature but just a
+				// convenienec in some cases that should not be needed now anyway.
+// 				if ( true === $this->get_ignore_warnings() ) {
+// 			
+// 					$temp_zip = $zip;
+// 			
+// 				} else {
+// 			
+// 					$temp_zip = $tempdir . basename( $zip );
+// 				
+// 				}		
+				
+				// Temporary zip file is _always_ located in the temp dir now
+				$temp_zip = $tempdir . basename( $zip );
+
+				$command .= " '{$temp_zip}' .";
+			
+				// Now create the inclusions file in the tempdir
+				$ifile = $tempdir . self::ZIP_INCLUSIONS_FILE_NAME;
+				
+				// Now the tricky bit - we have to determine how we are going to give the lisy of files
+				// to zip to use. Preferred way would be as a parameter that tells it to include the
+				// files listed in the file. Unfortunately there is no such option for zip - a list of
+				// files to include in a zip can only be given as discrete file names on the command line
+				// or read from stdin. Giving a long list of names on the command line is not
+				// feasible so we have to use a stdin based method which is either to cat the file and
+				// pipe it in to zip or we can use an stdin file descriptor redirection to fetch the
+				// contents of the file. We can only use these methods safely on *nix systems and when
+				// exec_dir is not in use.
+				// When we cannot use the stdin approach we have to resort to using the -i@file
+				// parameter along with the -r recursion option so that zip will match the "patterns"
+				// we give it in the file as it recurses the directory tree. This is not an ideal solution
+				// because the recursion can be slow on some servers where there is a big directory tree
+				// and much of it is irrelevant and does not belong to the site - but we have no other choice.
+				// We shouldn't have to use this method very much and it should be ok in many cases
+				// where there isn't much that is superfluous in the directory tree.
+				// So let's make up the final command to execute based on the operational environment
+				// and then we can simply "reuse" the command on each burst, with the addition of the
+				// -g option on bursts after the first.
+				if ( ( true === $this->get_exec_dir_flag() ) || ( self::OS_TYPE_WIN === $this->get_os_type() ) ) {
+				
+					// We are running on Windows or using exec_dir so have to use -r and -i@file
+					$command .= " -r -i@" . "'{$ifile}'";
 				
 				} else {
 				
-					pb_backupbuddy::status( 'details', sprintf( __( 'Zip Errors/Warnings cannot not be logged with this version of zip and exec_dir active', 'it-l10n-backupbuddy' ), true ) );
+					// We aer running under a nice *nix environment so we can use a stdin redirection
+					// approach. Let's just use redirection for now as that avoids having to use cat and
+					// piping.
+				
+// 					$command .= " -@";
+// 					$command = "cat '{$ifile}' | " . $command;
+					
+					$command .= " -@";
+					$command .= " <'{$ifile}'";
+					
+				}
+			
+				// If we can't use a log file but exec_dir isn't in use we can redirect stderr to stdout
+				// If exec_dir is in use we cannot redirect because of command line escaping so cannot log errors/warnings
+				if ( false === $zip_using_log_file ) {
+			
+					if ( false === $this->get_exec_dir_flag() ) {
+			
+						$command .= ' 2>&1';
+				
+					} else {
+				
+						pb_backupbuddy::status( 'details', sprintf( __( 'Zip Errors/Warnings cannot not be logged with this version of zip and exec_dir active', 'it-l10n-backupbuddy' ), true ) );
+				
+					}
 				
 				}
 				
-			}
-			
-			// Remember the current directory and change to the directory being added so that "." is valid in command
-			$working_dir = getcwd();
-			chdir( $dir );
-			
-			$command = ( self::OS_TYPE_WIN === $this->get_os_type() ) ? str_replace( '\'', '"', $command ) : $command;
-			
-			pb_backupbuddy::status( 'details', $this->get_method_tag() . __(' command','it-l10n-backupbuddy' ) . ': ' . $command );
-			@exec( $command, $output, $exitcode );
-						
-			// Set current working directory back to where we were
-			chdir( $working_dir );
-			
-			// Convenience for handling different scanarios
-			$result = false;
-			
-			// If we used a log file then process the log file - else process output
-			// Always scan the output/logfile for warnings, etc. and show warnings even if user has chosen to ignore them
-			if ( true === $zip_using_log_file ) {
-			
-				try {
+				// Remember our "master" command
+				$master_command = $command;
 				
-					$logfile = new SplFileObject( $logfile_name, "rb" );
+				// Remember the "master" inclusions list filename
+				$master_ifile = $ifile;
+				
+				// Use this to memorise the worst exit code we had (where we didn't immediately
+				// bail out because it signalled a bad failure)
+				$max_exitcode = 0;
+				
+				// Do this as close to when we actually want to start monitoring usage
+				// Maybe this is redundant as we have already called this in the constructor.
+				// If we want to do this then we have to call with true to reset monitoring to
+				// start now.
+				$zh->initialize_monitoring_usage();
+				
+				// Now we have our command prototype we can start bursting
+				// Simply build a burst list based on content size. Currently no
+				// look-ahead so the size will always exceed the current size threshold
+				// by some amount. May consider using a look-ahead to see if the next
+				// item would exceed the threshold in which case don't add it (unless it
+				// would be the only content in which case have to add it but also log
+				// a warning).
+				while ( !empty( $the_list ) ) {
+			
+					// Populate the content file for zip
+					$ilist = array();
 					
-					while( !$logfile->eof() ) {
+					// Tell helper that we are preparing a new burst
+					$zh->burst_begin();
 					
-						$line = $logfile->current();
-						$logfile->next();
+					pb_backupbuddy::status( 'details', sprintf( __( 'Zip process reported: Starting burst number: %1$s', 'it-l10n-backupbuddy' ), $zh->get_burst_count() ) );
+
+					// Helper keeps track of what is being added to the burst content and will
+					// tell us when the content is sufficient for this burst based on it's
+					// criteria - this can adapt to how each successive burst goes.
+					// The array shifting isn't really very efficient but is functional for now.
+					$item = array_shift( $the_list );
+					while ( ( NULL !== $item ) && ( false === $zh->burst_content_complete() ) ) {
+					
+						$file = $item[ 'relative_path' ] . $item[ 'filename' ];
 						
-						if ( preg_match( '/^\s*(zip warning:)/i', $line ) ) {
-						
-							$zip_warnings[ self::ZIP_WARNING_GENERIC][] = trim( $line );
-							$zip_warnings_count++;
+						// We shouldn't have any empty items here as we should have removed them
+						// earlier, but just in case...
+						if ( !empty( $file ) ) {
+							$ilist[] = $file;
 							
+							// Call the helper event handler as we add each file to the list
+							$zh->burst_content_added( $item );
+							
+						}
+						
+						// Not reached size threshold yet so get next item
+						$item = array_shift( $the_list );
+						
+					}
+					
+					// Since we would have taken a new element off the array specilatively
+					// we need to put it back if we had already reached burst content completion
+					( NULL !== $item ) ? array_unshift( $the_list, $item ) : false ;
+				
+					// Retain this for reference for now
+					//file_put_contents( ( dirname( $tempdir ) . DIRECTORY_SEPARATOR . self::ZIP_CONTENT_FILE_NAME ), print_r( $ilist, true ) );
+
+					// Make sure we expunge any previous version of the inclusions file
+					if ( file_exists( $ifile ) ) {			
+						@unlink( $ifile );			
+					}
+					
+					// Slight kludge for now to make sure each burst content file is uniquely named
+					$ifile = str_replace( ".txt", "_". $zh->get_burst_count() . ".txt", $master_ifile );
+					
+					$file_ok = @file_put_contents( $ifile, implode( PHP_EOL, $ilist ) . PHP_EOL );
+					if ( ( false === $file_ok ) || ( 0 === $file_ok ) ) {
+					
+						// The file write failed for some reason, e.g., no disk space? We need to
+						// bail and set exit code so that problem is apparent
+						pb_backupbuddy::status( 'details', sprintf( __('Zip process reported: Unable to write burst content file: `%1$s`','it-l10n-backupbuddy' ), $ifile ) );
+						$exitcode = 255;
+						break;					
+
+					}
+					
+					unset( $ilist );
+				
+
+					// Remember the current directory and change to the directory being added so that "." is valid in command
+					$working_dir = getcwd();
+				
+					chdir( $dir );
+				
+					// For first invocation we must not set the grow option so remove it from the command
+					// Bit of a hack for now.
+					if ( 1 === $zh->get_burst_count() ) {
+						$command = str_replace( "-g", "", $master_command );
+					} else {
+						$command = $master_command;
+					}
+					
+					// Make sure we put the correct burst content file name in the command
+					// Slight kludge for now until we build the command line dynamically each burst
+					$command = str_replace( $master_ifile, $ifile, $command );
+			
+					$command = ( self::OS_TYPE_WIN === $this->get_os_type() ) ? str_replace( '\'', '"', $command ) : $command;
+			
+					pb_backupbuddy::status( 'details', sprintf( __( 'Zip process reported: Burst requests %1$s (directories + files) with %2$s bytes of content to be added to backup zip archive', 'it-l10n-backupbuddy' ), $zh->get_burst_content_count(), $zh->get_burst_content_size() ) );
+					pb_backupbuddy::status( 'details', sprintf( __( 'Zip process reported: Using burst content file: `%1$s`', 'it-l10n-backupbuddy' ), $ifile ) );
+
+					pb_backupbuddy::status( 'details', __( 'Zip process reported: ') . $this->get_method_tag() . __(' command','it-l10n-backupbuddy' ) . ': ' . $command );
+
+					// Allow helper to check how the burst goes
+					$zh->burst_start();
+
+					// Successive invocations will append to $output array so we don't have to do anything special
+					// If we are using a log file then we have set that to append as well - so in either case when
+					// we finally exit we will have the sum total of the log output from all invocations.
+					@exec( $command, $output, $exitcode );
+					
+					// And now we can analyse what happened and plan for next burst if any
+					$zh->burst_stop();
+					
+					// Wrap up the individual burst handling
+					// Note: because we called exec we basically went into a wait condition and so (on Linux)
+					// we didn't consume any max_execution_time so we never really have to bother about
+					// resetting it. However, it is true that time will have elapsed so if this burst _does_
+					// take longer than our current burst threshold period then max_execution_time would be
+					// reset - but what this doesn't cover is a _cumulative_ effect of bursts and so we might
+					// consider reworking the mechanism to monitor this separately from the individual burst
+					// period (the confusion relates to this having originally applied to the time based
+					// burst handling fro pclzip rather than teh size based for exec). It could also be more
+					// relevant for Windows that doesn't stop the clock when exec is called.
+					$zh->burst_end();
+					pb_backupbuddy::status( 'details', sprintf( __( 'Zip process reported: Ending burst number: %1$s', 'it-l10n-backupbuddy' ), $zh->get_burst_count() ) );
+						
+					// Set current working directory back to where we were
+					chdir( $working_dir );
+					
+					// We have to check the exit code to decide whether to keep going ot bail out (break).
+					// If we get a 0 exit code ot 18 exit code then keep going and remember we got the 18
+					// so that we can emit that as the final exit code if applicable. If we get any other
+					// exit code then we must break out immediately.					
+					if ( ( 0 !== $exitcode ) && ( 18 !== $exitcode ) ) {
+						// Zip failure of some sort - must bail out with current exit code
+						break;
+					} else {
+						// Make sure exit code is always the worst we've had so that when
+						// we've done our last burst we drop out with the correct exit code set
+						// This is really to make sure we drop out with exit code 18 if we had
+						// this in _any_ burst as we would keep going and subsequent burst(s) may
+						// return 0. If we had any other non-zero exit code it would be a "fatal"
+						// error and we would have dropped out immediately anyway.
+						$exitcode = ( $max_exitcode > $exitcode ) ? $max_exitcode : ( $max_exitcode = $exitcode ) ;
+					}
+				
+				}
+			
+				// Convenience for handling different scanarios
+				$result = false;
+			
+				// We can report how many dirs/files added				
+				pb_backupbuddy::status( 'details', sprintf( __('Zip process reported: %1$s (directories + files) requested to be added to backup zip archive (final)','it-l10n-backupbuddy' ), ( $zh->get_added_dir_count() + $zh->get_added_file_count() ) ) );
+
+				// If we used a log file then process the log file - else process output
+				// Always scan the output/logfile for warnings, etc. and show warnings even if user has chosen to ignore them
+				if ( true === $zip_using_log_file ) {
+			
+					try {
+				
+						$logfile = new SplFileObject( $logfile_name, "rb" );
+					
+						while( !$logfile->eof() ) {
+					
+							$line = $logfile->current();
+							$id = $logfile->key(); // Use the line number as unique key for later sorting
+							$logfile->next();
+						
+							if ( preg_match( '/^\s*(zip warning:)/i', $line ) ) {
+						
+								// Looking for specific types of warning - in particular want the warning that
+								// indicates a file couldn't be read as we want to treat that as a "skipped"
+								// warning that indicates that zip flagged this as a potential problem but
+								// created the zip file anyway - but it would have generated the non-zero exit
+								// code of 18 and we key off that later. All other warnings are not considered
+								// reasons to return a non-zero exit code whilst still creating a zip file so
+								// we'll follow the lead on that and not have other warning types halt the backup.
+								// So we'll try and look for a warning output that looks like it is file related...
+								if ( preg_match( '/^\s*(zip warning:)\s*([^:]*:)\s*(.*)/i', $line, $matches ) ) {
+							
+									// Matched to what looks like a file related warning so check particular cases
+									switch ( strtolower( $matches[ 2 ] ) ) {
+										case "could not open for reading:":										
+											$zip_warnings[ self::ZIP_WARNING_SKIPPED ][ $id ] = trim( $line );
+											$zip_warnings_count++;
+											break;
+										case "name not matched:":										
+											$zip_other[ self::ZIP_OTHER_GENERIC ][ $id ] = trim( $line );
+											$zip_other_count++;
+											break;
+										default:
+											$zip_warnings[ self::ZIP_WARNING_GENERIC ][ $id ] = trim( $line );
+											$zip_warnings_count++;
+									}
+							
+								} else {
+							
+									// Didn't match to what would look like a file related warning so count it regardless
+									$zip_warnings[ self::ZIP_WARNING_GENERIC ][ $id ] = trim( $line );
+									$zip_warnings_count++;
+								
+								}
+							
+							} elseif ( preg_match( '/^\s*(zip error:)/i', $line ) ) {
+						
+								$zip_errors[ $id ] = trim( $line );
+								$zip_errors_count++;
+						
+							} elseif ( preg_match( '/^\s*(adding:)/i', $line ) ) {
+						
+								// Currently not processing additions entried
+								//$zip_additions[] = trim( $line );
+								//$zip_additions_count++;
+						
+							} elseif ( preg_match( '/^\s*(sd:)/i', $line ) ) {
+						
+								$zip_debug[ $id ] = trim( $line );
+								$zip_debug_count++;
+								
+							} elseif ( preg_match( '/^.*(skipped:)\s*(?P<skipped>\d+)/i', $line, $matches ) ) {
+							
+								if ( isset( $matches[ 'skipped' ] ) ) {
+									$zip_skipped_count = $matches[ 'skipped' ];
+								}
+								
+							} else {
+						
+								// Currently not processing other entries
+								//$zip_other[] = trim( $line );
+								//$zip_other_count++;
+						
+							}
+						
+						}
+					
+						unset( $logfile );
+					
+						@unlink( $logfile_name );
+					
+					} catch ( Exception $e ) {
+				
+						// Something fishy - we should have been able to open the log file...
+						$error_string = $e->getMessage();
+						pb_backupbuddy::status( 'details', sprintf( __('Log file could not be opened - error reported: %1$s','it-l10n-backupbuddy' ), $error_string ) );
+					
+					}
+
+				} else {
+			
+					// TODO: $output could be large so if we parse it all into separate arrays then may want to shift
+					// out each line and then discard it after copied to another array
+					$id = 0; // Create a unique key (like a line number) for later sorting
+					foreach ( $output as $line ) {
+				
+						if ( preg_match( '/^\s*(zip warning:)/i', $line ) ) {
+					
+							// Looking for specific types of warning - in particular want the warning that
+							// indicates a file couldn't be read as we want to treat that as a "skipped"
+							// warning that indicates that zip flagged this as a potential problem but
+							// created the zip file anyway - but it would have generated the non-zero exit
+							// code of 18 and we key off that later. All other warnings are not considered
+							// reasons to return a non-zero exit code whilst still creating a zip file so
+							// we'll follow the lead on that and not have other warning types halt the backup.
+							// So we'll try and look for a warning output that looks like it is file related...
+							if ( preg_match( '/^\s*(zip warning:)\s*([^:]*:)\s*(.*)/i', $line, $matches ) ) {
+						
+								// Matched to what looks like a file related warning so check particular cases
+								switch ( strtolower( $matches[ 2 ] ) ) {
+									case "could not open for reading:":										
+										$zip_warnings[ self::ZIP_WARNING_SKIPPED ][ $id++ ] = trim( $line );
+										$zip_warnings_count++;
+										break;
+									case "name not matched:":										
+										$zip_other[ self::ZIP_OTHER_GENERIC ][ $id++ ] = trim( $line );
+										$zip_other_count++;
+										break;
+									default:
+										$zip_warnings[ self::ZIP_WARNING_GENERIC ][ $id++ ] = trim( $line );
+										$zip_warnings_count++;
+								}
+						
+							} else {
+						
+								// Didn't match to what would look like a file related warning so count it regardless
+								$zip_warnings[ self::ZIP_WARNING_GENERIC ][ $id++ ] = trim( $line );
+								$zip_warnings_count++;
+							
+							}
+						
 						} elseif ( preg_match( '/^\s*(zip error:)/i', $line ) ) {
-						
-							$zip_errors[] = trim( $line );
+					
+							$zip_errors[ $id++ ] = trim( $line );
 							$zip_errors_count++;
-						
+					
 						} elseif ( preg_match( '/^\s*(adding:)/i', $line ) ) {
-						
+					
 							// Currently not processing additions entried
 							//$zip_additions[] = trim( $line );
 							//$zip_additions_count++;
-						
+							$id++;
+					
 						} elseif ( preg_match( '/^\s*(sd:)/i', $line ) ) {
-						
-							$zip_debug[] = trim( $line );
+					
+							$zip_debug[ $id++ ] = trim( $line );
 							$zip_debug_count++;
+					
+						} elseif ( preg_match( '/^.*(skipped:)\s*(?P<skipped>\d+)/i', $line, $matches ) ) {
 						
+							if ( isset( $matches[ 'skipped' ] ) ) {
+								$zip_skipped_count = $matches[ 'skipped' ];
+							}
+								
 						} else {
-						
+					
 							// Currently not processing other entries
 							//$zip_other[] = trim( $line );
 							//$zip_other_count++;
-						
+							$id++;
+					
 						}
-						
-					}
-					
-					unset( $logfile );
-					
-					@unlink( $logfile_name );
-					
-				} catch ( Exception $e ) {
-				
-					// Something fishy - we should have been able to open the log file...
-					$error_string = $e->getMessage();
-					pb_backupbuddy::status( 'details', sprintf( __('Log file could not be opened - error reported: %1$s','it-l10n-backupbuddy' ), $error_string ) );
-					
-				}
-
-			} else {
-			
-				// TODO: $output could be large so if we parse it all into separate arrays then may want to shift
-				// out each line and then discard it after copied to another array
-				foreach ( $output as $line ) {
-				
-					if ( preg_match( '/^\s*(zip warning:)/i', $line ) ) {
-					
-						$zip_warnings[ self::ZIP_WARNING_GENERIC][] = trim( $line );
-						$zip_warnings_count++;
-						
-					} elseif ( preg_match( '/^\s*(zip error:)/i', $line ) ) {
-					
-						$zip_errors[] = trim( $line );
-						$zip_errors_count++;
-					
-					} elseif ( preg_match( '/^\s*(adding:)/i', $line ) ) {
-					
-						// Currently not processing additions entried
-						//$zip_additions[] = trim( $line );
-						//$zip_additions_count++;
-					
-					} elseif ( preg_match( '/^\s*(sd:)/i', $line ) ) {
-					
-						$zip_debug[] = trim( $line );
-						$zip_debug_count++;
-					
-					} else {
-					
-						// Currently not processing other entries
-						//$zip_other[] = trim( $line );
-						//$zip_other_count++;
 					
 					}
-					
-				}
 	
-				// Now free up the memory...
-				unset( $output );
+					// Now free up the memory...
+					unset( $output );
 				
-			}
+				}
 			
-			// Set convenience flags			
-			$have_zip_warnings = ( 0 < $zip_warnings_count );
-			$have_zip_errors = ( 0 < $zip_errors_count );
-			$have_zip_additions = ( 0 < $zip_additions_count );
-			$have_zip_debug = ( 0 < $zip_debug_count );
-			$have_zip_other = ( 0 < $zip_other_count );
+				// Set convenience flags			
+				$have_zip_warnings = ( 0 < $zip_warnings_count );
+				$have_zip_errors = ( 0 < $zip_errors_count );
+				$have_zip_additions = ( 0 < $zip_additions_count );
+				$have_zip_debug = ( 0 < $zip_debug_count );
+				$have_zip_other = ( 0 < $zip_other_count );
 			
-			// Always report the number of warnings - even just to confirm that we didn't have any
-			pb_backupbuddy::status( 'details', sprintf( __('Zip process reported: %1$s warnings','it-l10n-backupbuddy' ), $zip_warnings_count ) );
+				// Always report the exit code regardless of whether we might ignore it or not
+				pb_backupbuddy::status( 'details', __('Zip process exit code: ','it-l10n-backupbuddy' ) . $exitcode );
+			
+				// Always report the number of warnings - even just to confirm that we didn't have any
+				pb_backupbuddy::status( 'details', sprintf( __('Zip process reported: %1$s warning%2$s','it-l10n-backupbuddy' ), $zip_warnings_count, ( ( 1 == $zip_warnings_count ) ? '' : 's' ) ) );
 
-			// Always report warnings regardless of whether user has selected to ignore them
-			if ( true === $have_zip_warnings ) {
+				// Always report warnings regardless of whether user has selected to ignore them
+				if ( true === $have_zip_warnings ) {
 			
-				// Output only the first max_lines lines at most - if more then indicate this and move the file so can been reviewed
-				if ( $zip_warnings_count > self::MAX_WARNING_LINES_TO_SHOW ) {
+					$this->log_zip_reports( $zip_warnings, self::$_warning_desc, "WARNING", self::MAX_WARNING_LINES_TO_SHOW, dirname( dirname( $tempdir ) ) . DIRECTORY_SEPARATOR . 'pb_backupbuddy' . DIRECTORY_SEPARATOR . self::ZIP_WARNINGS_FILE_NAME );
+
+				}
+			
+				// Always report other reports regardless
+				if ( true === $have_zip_other ) {
+			
+					// Only report number of informationals if we have any as they are not that important
+					pb_backupbuddy::status( 'details', sprintf( __('Zip process reported: %1$s information%2$s','it-l10n-backupbuddy' ), $zip_other_count, ( ( 1 == $zip_other_count ) ? 'al' : 'als' ) ) );
+
+					$this->log_zip_reports( $zip_other, self::$_other_desc, "INFORMATION", self::MAX_OTHER_LINES_TO_SHOW, dirname( dirname( $tempdir ) ) . DIRECTORY_SEPARATOR . 'pb_backupbuddy' . DIRECTORY_SEPARATOR . self::ZIP_OTHERS_FILE_NAME );
+
+				}
+			
+				// See if we can figure out what happened - note that $exitcode could be non-zero for actionable warning(s) or error
+				// if ( (no zip file) or (fatal exit code) or (not ignoring warnable exit code) )
+				// TODO: Handle condition testing with function calls based on mapping exit codes to exit type (fatal vs non-fatal)
+				if ( ( ! @file_exists( $temp_zip ) ) ||
+					 ( ( 0 != $exitcode ) && ( 18 != $exitcode ) ) ||
+					 ( ( 18 == $exitcode ) && !$this->get_ignore_warnings() ) ) {
+			
+					// If we have any zip errors reported show them regardless
+					if ( true === $have_zip_errors ) {
 				
-					// As we have multi-dimensional array we need to iterate through until we reach the max to show
-					$first_lines = array();
+						pb_backupbuddy::status( 'details', sprintf( __('Zip process reported: %1$s error%2$s','it-l10n-backupbuddy' ), $zip_errors_count, ( ( 1 == $zip_errors_count ) ? '' : 's' )  ) );
 					
-					foreach ( $zip_warnings as $reason => $warning ) {
-					
-						foreach ( $warning as $filename ) {
-
-							$first_lines[] = sprintf( __('WARNING: (%1$s): %2$s','it-l10n-backupbuddy' ), self::$_warning_desc[ $reason ], $filename );
-							if ( self::MAX_WARNING_LINES_TO_SHOW <= sizeof( $first_lines ) ) { break 2; }
-
+						foreach ( $zip_errors as $line ) {
+				
+							pb_backupbuddy::status( 'details', __( 'Zip process reported: ','it-l10n-backupbuddy' ) . $line );
+				
 						}
 					
 					}
-				
-					foreach ( $first_lines as $line ) {
-				
-						pb_backupbuddy::status( 'details', __( 'Zip process reported: ','it-l10n-backupbuddy' ) . $line );
-				
-					}
-					
-					// Too many warnings to show so dump them in a file (any existing file will be overwritten)
-					$warnings_file = dirname( dirname( $tempdir ) ) . DIRECTORY_SEPARATOR . 'pb_backupbuddy' . DIRECTORY_SEPARATOR . self::ZIP_WARNINGS_FILE_NAME;
-					
-					$warnings_array = array();
-					foreach ( $zip_warnings as $reason => $warning ) {
-					
-						foreach ( $warning as $filename ) {
 
-							$warnings_array[] = sprintf( __('WARNING: (%1$s): %2$s' . PHP_EOL,'it-l10n-backupbuddy' ), self::$_warning_desc[ $reason ], $filename );
-
-						}
-					
-					}
-						
-					@file_put_contents( $warnings_file, $warnings_array );
-					
-					if ( @file_exists( $warnings_file ) ) {
-					
-						pb_backupbuddy::status( 'details', __( 'Zip process reported ','it-l10n-backupbuddy' ) . ( $zip_warnings_count - self::MAX_WARNING_LINES_TO_SHOW ) . __( ' more errors - please review in: ','it-l10n-backupbuddy' ) . $warnings_file );
-						
-					}
-					
+					// Report whether or not the zip file was created (whether that be in the final or temporary location)			
+					if ( ! @file_exists( $temp_zip ) ) {
 				
-				} else {
-				
-					// Small number of lines so just show them all
-					foreach ( $zip_warnings as $reason => $warning ) {
+						pb_backupbuddy::status( 'details', __( 'Zip Archive file not created - check process exit code.','it-l10n-backupbuddy' ) );
 					
-						foreach ( $warning as $filename ) {
-
-							pb_backupbuddy::status( 'details', sprintf( __('WARNING: (%1$s): %2$s','it-l10n-backupbuddy' ), self::$_warning_desc[ $reason ], $filename ) );
-						
-						}
-					
-					}
-					
-				}
-				
-			} else {
-			
-				// As we have no warnings make sure we delete any warnings file that may have been left from last time
-				$warnings_file = dirname( dirname( $tempdir ) ) . DIRECTORY_SEPARATOR . 'pb_backupbuddy' . DIRECTORY_SEPARATOR . self::ZIP_WARNINGS_FILE_NAME;
-				if ( @file_exists( $warnings_file ) ) {
-				
-					@unlink( $warnings_file );
-					
-				}
-								
-			}
-				
-			// See if we can figure out what happened - note that $exitcode could be non-zero for a warning or error
-			// if ( (no zip file) or (fatal exit code) or (not ignoring warnable exit code) or (not ignoring some other detected warning) )
-			// TODO: Handle condition testing with function calls based on mapping exit codes to exit type (fatal vs non-fatal)
-			if ( ( ! @file_exists( $temp_zip ) ) ||
-				 ( ( 0 != $exitcode ) && ( 18 != $exitcode ) ) ||
-				 ( ( 18 == $exitcode ) && !$this->get_ignore_warnings() ) ||
-				 ( $have_zip_warnings  && !$this->get_ignore_warnings() ) ) {
-			
-				// If we had a non-zero exit code then should report it (file may or may not be created)
-				if ( $exitcode != 0 ) {
-				
-					pb_backupbuddy::status( 'details', __('Zip process exit code: ','it-l10n-backupbuddy' ) . $exitcode );
-					
-				}
-				
-				// If we have any zip errors reported show them regardless
-				if ( true === $have_zip_errors ) {
-				
-					pb_backupbuddy::status( 'details', sprintf( __('Zip process reported: %1$s errors','it-l10n-backupbuddy' ), $zip_errors_count ) );
-					
-					foreach ( $zip_errors as $line ) {
-				
-						pb_backupbuddy::status( 'details', __( 'Zip process reported: ','it-l10n-backupbuddy' ) . $line );
-				
-					}
-					
-				}
-
-				// Report whether or not the zip file was created (whether that be in the final or temporary location)			
-				if ( ! @file_exists( $temp_zip ) ) {
-				
-					pb_backupbuddy::status( 'details', __( 'Zip Archive file not created - check process exit code.','it-l10n-backupbuddy' ) );
-					
-				} else {
-					
-					pb_backupbuddy::status( 'details', __( 'Zip Archive file created but with errors/warnings so will be deleted - check process exit code and warnings.','it-l10n-backupbuddy' ) );
-
-				}
-				
-				// The operation has failed one way or another. Note that as the user didn't choose to ignore errors the zip file
-				// is always created in a temporary location and then only moved to final location on success without error or warnings.
-				// Therefore if there is a zip file (produced but with warnings) it will not be visible and will be deleted when the
-				// temporary directory is deleted below.
-				
-				$result = false;
-				
-			} else {
-			
-				// Got file with no error or warnings _or_ with warnings that the user has chosen to ignore
-				if ( false === $this->get_ignore_warnings() ) {
-				
-					// Because not ignoring warnings the zip archive was built in temporary location so we need to move it
-					pb_backupbuddy::status( 'details', __('Moving Zip Archive file to local archive directory.','it-l10n-backupbuddy' ) );
-				
-					// Make sure no stale file information
-					clearstatcache();
-					
-					@rename( $temp_zip, $zip );
-					
-					if ( @file_exists( $zip ) ) {
-					
-						pb_backupbuddy::status( 'details', __('Zip Archive file moved to local archive directory.','it-l10n-backupbuddy' ) );
-						pb_backupbuddy::status( 'message', __( 'Zip Archive file successfully created with no errors or warnings.','it-l10n-backupbuddy' ) );
-						
-						$this->log_archive_file_stats( $zip );
-							
-						$result = true;
-						
 					} else {
 					
-						pb_backupbuddy::status( 'details', __('Zip Archive file could not be moved to local archive directory.','it-l10n-backupbuddy' ) );
-						$result = false;
-						
+						pb_backupbuddy::status( 'details', __( 'Zip Archive file created but with errors/actionable-warnings so will be deleted - check process exit code and warnings.','it-l10n-backupbuddy' ) );
+
 					}
-						
-				} else {
 				
-					// Warnings were being ignored so built in final location so no need to move it
-					if ( @file_exists( $zip ) ) {
+					// The operation has failed one way or another. Note that as the user didn't choose to ignore errors the zip file
+					// is always created in a temporary location and then only moved to final location on success without error or warnings.
+					// Therefore if there is a zip file (produced but with warnings) it will not be visible and will be deleted when the
+					// temporary directory is deleted below.
+				
+					$result = false;
+				
+				} else {
+			
+					// NOTE: Probably the two paths below can be reduced to one because even if we are
+					// ignoring warnings we are still building the zip in temporary location and finally
+					// moving it because we are growing it.
+					// Got file with no error or warnings _or_ with warnings that the user has chosen to ignore
+					if ( false === $this->get_ignore_warnings() ) {
+				
+						// Because not ignoring warnings the zip archive was built in temporary location so we need to move it
+						pb_backupbuddy::status( 'details', __('Moving Zip Archive file to local archive directory.','it-l10n-backupbuddy' ) );
+				
+						// Make sure no stale file information
+						clearstatcache();
 					
-						pb_backupbuddy::status( 'message', __( 'Zip Archive file successfully created with no errors (any warnings ignored by user settings).','it-l10n-backupbuddy' ) );
+						@rename( $temp_zip, $zip );
+					
+						if ( @file_exists( $zip ) ) {
+					
+							pb_backupbuddy::status( 'details', __('Zip Archive file moved to local archive directory.','it-l10n-backupbuddy' ) );
+							pb_backupbuddy::status( 'message', __( 'Zip Archive file successfully created with no errors or actionable warnings.','it-l10n-backupbuddy' ) );
 						
-						$this->log_archive_file_stats( $zip );
+							$this->log_archive_file_stats( $zip, array( 'content_size' => $total_size ) );
 							
-						$result = true;
+							// Temporary for now - try and incorporate into stats logging (makes the stats logging function part of the zip helper class?)
+							pb_backupbuddy::status( 'details', sprintf( __('Zip Archive file size: %1$s (directories + files) actually added','it-l10n-backupbuddy' ), ( $zh->get_added_dir_count() + $zh->get_added_file_count() - $zip_skipped_count ) ) );
+					
+							$result = true;
+						
+						} else {
+					
+							pb_backupbuddy::status( 'details', __('Zip Archive file could not be moved to local archive directory.','it-l10n-backupbuddy' ) );
+							$result = false;
+						
+						}
 						
 					} else {
+				
+						// With multi-burst we haev to always build the zip in temp location  so always have to move it
+						pb_backupbuddy::status( 'details', __('Moving Zip Archive file to local archive directory.','it-l10n-backupbuddy' ) );
+				
+						// Make sure no stale file information
+						clearstatcache();
 					
-						// Odd condition - file should be present but apparently not?
-						pb_backupbuddy::status( 'details', __('Zip Archive file could not be found in local archive directory.','it-l10n-backupbuddy' ) );
-						$result = false;
+						@rename( $temp_zip, $zip );
 						
+						if ( @file_exists( $zip ) ) {
+					
+							pb_backupbuddy::status( 'details', __('Zip Archive file moved to local archive directory.','it-l10n-backupbuddy' ) );
+							pb_backupbuddy::status( 'message', __( 'Zip Archive file successfully created with no errors (any actionable warnings ignored by user settings).','it-l10n-backupbuddy' ) );
+						
+							$this->log_archive_file_stats( $zip, array( 'content_size' => $total_size ) );
+							
+							// Temporary for now - try and incorporate into stats logging (makes the stats logging function part of the zip helper class?)
+							pb_backupbuddy::status( 'details', sprintf( __('Zip Archive file size: %1$s (directories + files) actually added','it-l10n-backupbuddy' ), ( $zh->get_added_dir_count() + $zh->get_added_file_count() - $zip_skipped_count ) ) );
+							
+							$result = true;
+						
+						} else {
+					
+							pb_backupbuddy::status( 'details', __('Zip Archive file could not be moved to local archive directory.','it-l10n-backupbuddy' ) );
+							$result = false;
+						
+						}
+				
 					}
 				
 				}
 				
-			}			
+			}		
 
 			// Cleanup the temporary directory that will have all detritus and maybe incomplete zip file			
 			pb_backupbuddy::status( 'details', __('Removing temporary directory.','it-l10n-backupbuddy' ) );
@@ -1468,21 +2101,31 @@ if ( !class_exists( "pluginbuddy_zbzipexec" ) ) {
 		 *	extract()
 		 *
 		 *	Extracts the contents of a zip file to the specified directory using the best unzip methods possible.
+		 *	If no specific items given to extract then it's a complete unzip
 		 *
 		 *	@param	string		$zip_file					Full path & filename of ZIP file to extract from.
 		 *	@param	string		$destination_directory		Full directory path to extract into.
-		 *	@return	bool									true on success, false otherwise
+		 *	@param	array		$items						Mapping of what to extract and to what
+		 *	@return	bool									true on success (all extractions successful), false otherwise
 		 */
-		public function extract( $zip_file, $destination_directory = '' ) {
+		public function extract( $zip_file, $destination_directory = '', $items = array() ) {
 		
 			$result = false;
 		
 			switch ( $this->get_os_type() ) {
 				case self::OS_TYPE_NIX:
-					$result = $this->extract_generic( $zip_file, $destination_directory );
+					if ( empty( $items ) ) {
+						$result = $this->extract_generic_full( $zip_file, $destination_directory );
+					} else {
+						$result = $this->extract_generic_selected( $zip_file, $destination_directory, $items );					
+					}
 					break;
 				case self::OS_TYPE_WIN:
-					$result = $this->extract_generic( $zip_file, $destination_directory );
+					if ( empty( $items ) ) {
+						$result = $this->extract_generic_full( $zip_file, $destination_directory );
+					} else {
+						$result = $this->extract_generic_selected( $zip_file, $destination_directory, $items );					
+					}
 					break;
 				default:
 					$result = false;
@@ -1493,7 +2136,7 @@ if ( !class_exists( "pluginbuddy_zbzipexec" ) ) {
 		}
 
 		/**
-		 *	extract_linux()
+		 *	extract_generic_full()
 		 *
 		 *	Extracts the contents of a zip file to the specified directory using the best unzip methods possible.
 		 *
@@ -1501,7 +2144,7 @@ if ( !class_exists( "pluginbuddy_zbzipexec" ) ) {
 		 *	@param	string		$destination_directory		Full directory path to extract into.
 		 *	@return	bool									true on success, false otherwise
 		 */
-		public function extract_generic( $zip_file, $destination_directory = '' ) {
+		protected function extract_generic_full( $zip_file, $destination_directory = '' ) {
 		
 			$summary = '';
 			$output = array();
@@ -1597,6 +2240,134 @@ if ( !class_exists( "pluginbuddy_zbzipexec" ) ) {
 		}
 
 		/**
+		 *	extract_generic_selected()
+		 *
+		 *	Extracts the contents of a zip file to the specified directory using the best unzip methods possible.
+		 *
+		 *	@param	string		$zip_file					Full path & filename of ZIP file to extract from.
+		 *	@param	string		$destination_directory		Full directory path to extract into.
+		 *	@param	array		$items						Mapping of what to extract and to what
+		 *	@return	bool									true on success (all extractions successful), false otherwise
+		 */
+		protected function extract_generic_selected( $zip_file, $destination_directory = '', $items ) {
+		
+			$summary = '';
+			$output = array();
+			$exit_code = 127;
+			$matches = array();
+			$result = false;
+			$zippath = '';
+			$command = '';
+			$rename_required = false;
+			
+			if ( function_exists( 'exec' ) ) {
+			
+				// Get the command path for the unzip command - should return a trimmed string
+				$zippath = $this->get_command_path( self::COMMAND_UNZIP_PATH );
+				
+				// Determine if we are using an absolute path
+				if ( !empty ( $zippath ) ) {
+				
+					pb_backupbuddy::status( 'details', __( 'Using absolute unzip path: ','it-l10n-backupbuddy' ) . $zippath );
+					
+				}
+				
+				// Add the trailing slash if required
+				$command = $this->slashify( $zippath ) . 'unzip';	
+	
+				// Now we need to take each item and run an unzip for it - unfortunately there is no easy way of combining
+				// arbitrary extractions into a single command if some might be to a 
+				foreach ( $items as $what => $where ) {
+				
+					$rename_required = false;
+					$result = false;
+				
+					// Decide how to extract based on where
+					if ( empty( $where) ) {
+					
+						// Extract direct to destination directory with junked path
+						$unzip_command = $command . " -qqoj '{$zip_file}' '{$what}' -d '{$destination_directory}' ";
+					
+					} elseif ( !empty( $where ) ) {
+					
+						if ( $what === $where ) {
+						
+							// Extract to same directory structure - don't junk path, no need to add where to destnation as automatic
+							$unzip_command = $command . " -qqo '{$zip_file}' '{$what}' -d '{$destination_directory}' ";
+						
+						} else {
+						
+							// Firt we'll extract and junk the path
+							$unzip_command = $command . " -qqoj '{$zip_file}' '{$what}' -d '{$destination_directory}' ";
+							
+							// Will need to rename if the extract is ok
+							$rename_required = true;
+						
+						}
+					
+					}
+				
+					$unzip_command = ( self::OS_TYPE_WIN === $this->get_os_type() ) ? str_replace( '\'', '"', $unzip_command ) : $unzip_command;
+				
+					@exec( $unzip_command, $output, $exit_code);
+				
+					// Note: we don't open the file and then do stuff but it's all done in one action
+					// so we need to interpret the return code to dedide what to do
+					switch ( (int) $exit_code ) {
+						case 0:
+							// Handled archive and apparently no extraction problems						
+							pb_backupbuddy::status( 'details', sprintf( __('exec (unzip) extracted file contents (%1$s from %2$s to %3$s%4$s)','it-l10n-backupbuddy' ), $what, $zip_file, $destination_directory, $where ) );
+						
+							$result = true;
+							
+							// Rename if we have to
+							if ( true === $rename_required) {
+							
+								// Note: we junked the path on the extraction so just the filename of $what is the source but
+								// $where could be a simple file name or a file path 
+								$result = $result && rename( $destination_directory . DIRECTORY_SEPARATOR . basename( $what ),
+															 $destination_directory . DIRECTORY_SEPARATOR . $where );
+								
+							}
+							break;
+
+						default:
+							// For now let's just print the error code and drop through
+							$error_string = $exit_code;
+							pb_backupbuddy::status( 'details', sprintf( __('exec (unzip) failed to open/process file to extract contents (%1$s from %2$s to %3$s%4$s) - Error Info: %5$s.','it-l10n-backupbuddy' ), $what, $zip_file, $destination_directory, $where, $error_string ) );
+
+							// Return an error code and a description - this needs to be handled more generically
+							//$result = array( 1, "Unable to get archive contents" );
+							// Currently as we are returning an array as a valid result we just return false on failure
+							$result = false;
+					}
+					
+					// If the extraction failed (or rename after extraction) then break out of the foreach and simply return false
+					if ( false === $result ) {
+					
+						break;
+						
+					}
+					
+				}
+				
+			} else {
+			
+				// Something fishy - the methods indicated exec but we couldn't find the function
+				pb_backupbuddy::status( 'details', __('exec indicated as available method but exec function non-existent','it-l10n-backupbuddy' ) );
+
+				// Return an error code and a description - this needs to be handled more generically
+				//$result = array( 1, "Class not available to match method" );
+				// Currently as we are returning an array as a valid result we just return false on failure
+				$result = false;
+
+			}
+			
+			return $result;
+						
+		}
+
+		/**
 		 *	file_exists()
 		 *	
 		 *	Tests whether a file (with path) exists in the given zip file
@@ -1640,7 +2411,7 @@ if ( !class_exists( "pluginbuddy_zbzipexec" ) ) {
 		 */
 		public function file_exists_generic( $zip_file, $locate_file ) {
 		
-			$result = false;
+			$result = array( 1, "Generic failure indication" );
 			$zippath = '';
 			$command = '';
 			
@@ -1683,6 +2454,9 @@ if ( !class_exists( "pluginbuddy_zbzipexec" ) ) {
 						// For now let's just print the error code and drop through
 						$error_string = $exit_code;
 						pb_backupbuddy::status( 'details', sprintf( __('exec (unzip) failed to open/process file to check if file exists (looking for %1$s in %2$s) - Error Info: %3$s.','it-l10n-backupbuddy' ), $locate_file , $zip_file, $error_string ) );
+
+						// Return an error code and a description - this needs to be handled more generically
+						$result = array( 1, "Failed to open/process file" );
 
 				}
 				
@@ -2081,4 +2855,3 @@ if ( !class_exists( "pluginbuddy_zbzipexec" ) ) {
 	} // end pluginbuddy_zbzipexec class.	
 	
 }
-?>

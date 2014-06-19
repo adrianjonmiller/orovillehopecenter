@@ -384,6 +384,7 @@ if ( !class_exists( "pluginbuddy_zbzippclzip" ) ) {
 						$this->_method_details[ 'attr' ][ 'is_lister' ] = true;
 						$this->_method_details[ 'attr' ][ 'is_commenter' ] = true;
 						$this->_method_details[ 'attr' ][ 'is_unarchiver' ] = true;
+						$this->_method_details[ 'attr' ][ 'is_extractor' ] = true;
 						
 						pb_backupbuddy::status( 'details', __('PclZip test PASSED.','it-l10n-backupbuddy' ) );
 						$result = true;
@@ -602,11 +603,11 @@ if ( !class_exists( "pluginbuddy_zbzippclzip" ) ) {
 				if ( true === $this->get_ignore_warnings() ) {
 				
 					// Note: warnings are being ignored but will still be gathered and logged
-					pb_backupbuddy::status( 'details', __('Zip archive creation warnings will be ignored based on settings.','it-l10n-backupbuddy' ) );
+					pb_backupbuddy::status( 'details', __('Zip archive creation actionable warnings will be ignored based on settings.','it-l10n-backupbuddy' ) );
 					
 				} else {
 				
-					pb_backupbuddy::status( 'details', __('Zip archive creation warnings will not be ignored based on settings.','it-l10n-backupbuddy' ) );
+					pb_backupbuddy::status( 'details', __('Zip archive creation actionable warnings will not be ignored based on settings.','it-l10n-backupbuddy' ) );
 
 				}
 				
@@ -726,6 +727,7 @@ if ( !class_exists( "pluginbuddy_zbzippclzip" ) ) {
 					$exitcode = 0;
 					
 					// Process the array for any "warnings" or other reportable conditions
+					$id = 0; // Create a unique key (like a line number) for later sorting
 					foreach( $output as $file ) {
 					
 						switch ( $file[ 'status' ] ) {
@@ -736,6 +738,7 @@ if ( !class_exists( "pluginbuddy_zbzippclzip" ) ) {
 								
 									if ( !( false === strpos( $file[ 'filename' ], $prefix ) ) ) {
 									
+										$id++;
 										// break out of the foreach and the switch
 										break 2;
 										
@@ -750,27 +753,28 @@ if ( !class_exists( "pluginbuddy_zbzippclzip" ) ) {
 									$symlinks_found[] = $file[ 'filename' ];
 									
 									// Skipped because we are ignoring symlinks and this is a symlink
-									$zip_other[ self::ZIP_OTHER_IGNORED_SYMLINK][] = $file[ 'filename' ];
+									$zip_other[ self::ZIP_OTHER_IGNORED_SYMLINK ][ $id++ ] = $file[ 'filename' ];
 									$zip_other_count++;
 									
 								} else {
 								
 									//Skipped because probably unreadable or non-existent (catch-all for now)
-									$zip_warnings[ self::ZIP_WARNING_SKIPPED ][] = $file[ 'filename' ];
+									$zip_warnings[ self::ZIP_WARNING_SKIPPED ][ $id++ ] = $file[ 'filename' ];
 									$zip_warnings_count++;
 									
 								}
 								break;
 							case "filtered":
-								$zip_warnings[ self::ZIP_WARNING_FILTERED ][] = $file[ 'filename' ];
+								$zip_warnings[ self::ZIP_OTHER_FILTERED ][ $id++ ] = $file[ 'filename' ];
 								$zip_warnings_count++;
 								break;
 							case "filename_too_long":
-								$zip_warnings[ self::ZIP_WARNING_LONGPATH ][] = $file[ 'filename' ];
+								$zip_warnings[ self::ZIP_OTHER_LONGPATH ][ $id++ ] = $file[ 'filename' ];
 								$zip_warnings_count++;
 								break;
 							default:
 								// Currently not processing "ok" entries
+								$id++;
 						}
 					
 					}
@@ -797,157 +801,29 @@ if ( !class_exists( "pluginbuddy_zbzippclzip" ) ) {
 				// Convenience for handling different scanarios
 				$result = false;
 				
+				// Always report the exit code regardless of whether we might ignore it or not
+				pb_backupbuddy::status( 'details', __('Zip process exit code: ','it-l10n-backupbuddy' ) . $exitcode );
+	
 				// Always report the number of warnings - even just to confirm that we didn't have any
-				pb_backupbuddy::status( 'details', sprintf( __('Zip process reported: %1$s warnings','it-l10n-backupbuddy' ), $zip_warnings_count ) );
+				pb_backupbuddy::status( 'details', sprintf( __('Zip process reported: %1$s warning%2$s','it-l10n-backupbuddy' ), $zip_warnings_count, ( ( 1 == $zip_warnings_count ) ? '' : 's' ) ) );
 				
 				// Always report warnings regardless of whether user has selected to ignore them
 				if ( true === $have_zip_warnings ) {
-				
-					if ( $zip_warnings_count > self::MAX_WARNING_LINES_TO_SHOW ) {
-					
-						// As we have multi-dimensional array we need to iterate through until we reach the max to show
-						$first_lines = array();
-						
-						foreach ( $zip_warnings as $reason => $warning ) {
-						
-							foreach ( $warning as $filename ) {
-	
-								$first_lines[] = sprintf( __('WARNING: (%1$s): %2$s','it-l10n-backupbuddy' ), self::$_warning_desc[ $reason ], $filename );
-								if ( self::MAX_WARNING_LINES_TO_SHOW <= sizeof( $first_lines ) ) { break 2; }
+			
+					$this->log_zip_reports( $zip_warnings, self::$_warning_desc, "WARNING", self::MAX_WARNING_LINES_TO_SHOW, dirname( dirname( $tempdir ) ) . DIRECTORY_SEPARATOR . 'pb_backupbuddy' . DIRECTORY_SEPARATOR . self::ZIP_WARNINGS_FILE_NAME );
 
-							}
-						
-						}
-						
-						foreach ( $first_lines as $line ) {
-					
-							pb_backupbuddy::status( 'details', __( 'Zip process reported: ','it-l10n-backupbuddy' ) . $line );
-					
-						}
-						
-						// Too many warnings to show so dump them in a file (any existing file will be overwritten)
-						$warnings_file = dirname( dirname( $tempdir ) ) . DIRECTORY_SEPARATOR . 'pb_backupbuddy' . DIRECTORY_SEPARATOR . self::ZIP_WARNINGS_FILE_NAME;
-						
-						$warnings_array = array();
-						foreach ( $zip_warnings as $reason => $warning ) {
-						
-							foreach ( $warning as $filename ) {
-	
-								$warnings_array[] = sprintf( __('WARNING: (%1$s): %2$s' . PHP_EOL,'it-l10n-backupbuddy' ), self::$_warning_desc[ $reason ], $filename );
-
-							}
-						
-						}
-						
-						@file_put_contents( $warnings_file, $warnings_array );
-						
-						if ( @file_exists( $warnings_file ) ) {
-						
-							pb_backupbuddy::status( 'details', __( 'Zip process reported ','it-l10n-backupbuddy' ) . ( $zip_warnings_count - self::MAX_WARNING_LINES_TO_SHOW ) . __( ' more warnings - please review in: ','it-l10n-backupbuddy' ) . $warnings_file );
-							
-						}
-					
-					} else {
-				
-						// Small number of lines so just show them all
-						foreach ( $zip_warnings as $reason => $warning ) {
-						
-							foreach ( $warning as $filename ) {
-	
-								pb_backupbuddy::status( 'details', sprintf( __('WARNING: (%1$s): %2$s','it-l10n-backupbuddy' ), self::$_warning_desc[ $reason ], $filename ) );
-							
-							}
-						
-						}
-						
-					}
-				
-				} else {
-				
-					// As we have no warnings make sure we delete any warnings file that may have been left from last time
-					$warnings_file = dirname( dirname( $tempdir ) ) . DIRECTORY_SEPARATOR . 'pb_backupbuddy' . DIRECTORY_SEPARATOR . self::ZIP_WARNINGS_FILE_NAME;
-					if ( @file_exists( $warnings_file ) ) {
-					
-						@unlink( $warnings_file );
-						
-					}
-								
 				}
-
-				// Always report other informational stuff - 
+			
+				// Always report other reports regardless
 				if ( true === $have_zip_other ) {
-				
-					if ( $zip_other_count > self::MAX_OTHER_LINES_TO_SHOW ) {
-					
-						// As we have multi-dimensional array we need to iterate through until we reach the max to show
-						$first_lines = array();
-						
-						foreach ( $zip_other as $reason => $other ) {
-						
-							foreach ( $other as $filename ) {
-	
-								$first_lines[] = sprintf( __('INFORMATION: (%1$s): %2$s','it-l10n-backupbuddy' ), self::$_other_desc[ $reason ], $filename );
-								if ( self::MAX_OTHER_LINES_TO_SHOW <= sizeof( $first_lines ) ) { break 2; }
+			
+					// Only report number of informationals if we have any as they are not that important
+					pb_backupbuddy::status( 'details', sprintf( __('Zip process reported: %1$s information%2$s','it-l10n-backupbuddy' ), $zip_other_count, ( ( 1 == $zip_other_count ) ? 'al' : 'als' ) ) );
 
-							}
-						
-						}
-						
-						foreach ( $first_lines as $line ) {
-					
-							pb_backupbuddy::status( 'details', __( 'Zip process reported: ','it-l10n-backupbuddy' ) . $line );
-					
-						}
-						
-						// Too many other to show so dump them in a file (any existing file will be overwritten)
-						$other_file = dirname( dirname( $tempdir ) ) . DIRECTORY_SEPARATOR . 'pb_backupbuddy' . DIRECTORY_SEPARATOR . self::ZIP_OTHERS_FILE_NAME;
-						
-						$other_array = array();
-						foreach ( $zip_other as $reason => $other ) {
-						
-							foreach ( $other as $filename ) {
-	
-								$other_array[] = sprintf( __('INFORMATION: (%1$s): %2$s' . PHP_EOL,'it-l10n-backupbuddy' ), self::$_other_desc[ $reason ], $filename );
+					$this->log_zip_reports( $zip_other, self::$_other_desc, "INFORMATION", self::MAX_OTHER_LINES_TO_SHOW, dirname( dirname( $tempdir ) ) . DIRECTORY_SEPARATOR . 'pb_backupbuddy' . DIRECTORY_SEPARATOR . self::ZIP_OTHERS_FILE_NAME );
 
-							}
-						
-						}
-						
-						@file_put_contents( $other_file, $other_array );
-						
-						if ( @file_exists( $other_file ) ) {
-						
-							pb_backupbuddy::status( 'details', __( 'Zip process reported ','it-l10n-backupbuddy' ) . ( $zip_other_count - self::MAX_OTHER_LINES_TO_SHOW ) . __( ' more informational messages - please review in: ','it-l10n-backupbuddy' ) . $other_file );
-							
-						}
-					
-					} else {
-				
-						// Small number of lines so just show them all
-						foreach ( $zip_other as $reason => $other ) {
-						
-							foreach ( $other as $filename ) {
-	
-								pb_backupbuddy::status( 'details', sprintf( __('INFORMATION: (%1$s): %2$s','it-l10n-backupbuddy' ), self::$_other_desc[ $reason ], $filename ) );
-							
-							}
-						
-						}
-						
-					}
-				
-				} else {
-				
-					// As we have no other messages make sure we delete any others file that may have been left from last time
-					$other_file = dirname( dirname( $tempdir ) ) . DIRECTORY_SEPARATOR . 'pb_backupbuddy' . DIRECTORY_SEPARATOR . self::ZIP_OTHERS_FILE_NAME;
-					if ( @file_exists( $other_file ) ) {
-					
-						@unlink( $other_file );
-						
-					}
-								
 				}
-
+			
 				// See if we can figure out what happened
 				// Note: only expect exitcode to be non-zero for an error we couldn't pre-empt
 				// Note: warnings will cause the operation to be stopped if user hasn't chosen to ignore regardless
@@ -955,19 +831,12 @@ if ( !class_exists( "pluginbuddy_zbzippclzip" ) ) {
 				// Note: a non-zero exitcode and presence of warnings are mutually exclusive
 				if ( ( ! @file_exists( $temp_zip ) ) ||
 					 ( 0 != $exitcode ) ||
-					 ( $have_zip_warnings && !$this->get_ignore_warnings() ) ) {
+					 ( ( true == $have_zip_warnings ) && !$this->get_ignore_warnings() ) ) {
 				
-					// If we had a non-zero exit code then should report it (file may or may not be created)
-					if ( 0 != $exitcode ) {
-					
-						pb_backupbuddy::status( 'details', __('Zip process exit code: ','it-l10n-backupbuddy' ) . $exitcode );
-						
-					}
-	
 					// If we have any zip errors reported show them regardless
-					if ( $have_zip_errors ) {
+					if ( true == $have_zip_errors ) {
 					
-						pb_backupbuddy::status( 'details', sprintf( __('Zip process reported: %1$s errors','it-l10n-backupbuddy' ), $zip_errors_count ) );
+						pb_backupbuddy::status( 'details', sprintf( __('Zip process reported: %1$s error%2$s','it-l10n-backupbuddy' ), $zip_errors_count, ( ( 1 == $zip_errors_count ) ? '' : 's' )  ) );
 					
 						foreach ( $zip_errors as $line ) {
 						
@@ -984,7 +853,7 @@ if ( !class_exists( "pluginbuddy_zbzippclzip" ) ) {
 						
 					} else {
 						
-						pb_backupbuddy::status( 'details', __( 'Zip Archive file created but with errors/warnings so will be deleted - check process exit code and warnings.','it-l10n-backupbuddy' ) );
+						pb_backupbuddy::status( 'details', __( 'Zip Archive file created but with errors/actionable-warnings so will be deleted - check process exit code and warnings.','it-l10n-backupbuddy' ) );
 	
 					}
 					
@@ -1013,7 +882,7 @@ if ( !class_exists( "pluginbuddy_zbzippclzip" ) ) {
 					if ( @file_exists( $zip ) ) {
 					
 						pb_backupbuddy::status( 'details', __('Zip Archive file moved to local archive directory.','it-l10n-backupbuddy' ) );
-						pb_backupbuddy::status( 'message', __( 'Zip Archive file successfully created with no errors (any warnings ignored by user settings).','it-l10n-backupbuddy' ) );
+						pb_backupbuddy::status( 'message', __( 'Zip Archive file successfully created with no errors (any actionable warnings ignored by user settings).','it-l10n-backupbuddy' ) );
 						
 						$this->log_archive_file_stats( $zip );
 						
@@ -1049,12 +918,50 @@ if ( !class_exists( "pluginbuddy_zbzippclzip" ) ) {
 		 *	extract()
 		 *
 		 *	Extracts the contents of a zip file to the specified directory using the best unzip methods possible.
+		 *	If no specific items given to extract then it's a complete unzip
+		 *
+		 *	@param	string		$zip_file					Full path & filename of ZIP file to extract from.
+		 *	@param	string		$destination_directory		Full directory path to extract into.
+		 *	@param	array		$items						Mapping of what to extract and to what
+		 *	@return	bool									true on success (all extractions successful), false otherwise
+		 */
+		public function extract( $zip_file, $destination_directory = '', $items = array() ) {
+		
+			$result = false;
+		
+			switch ( $this->get_os_type() ) {
+				case self::OS_TYPE_NIX:
+					if ( empty( $items ) ) {
+						$result = $this->extract_generic_full( $zip_file, $destination_directory );
+					} else {
+						$result = $this->extract_generic_selected( $zip_file, $destination_directory, $items );					
+					}
+					break;
+				case self::OS_TYPE_WIN:
+					if ( empty( $items ) ) {
+						$result = $this->extract_generic_full( $zip_file, $destination_directory );
+					} else {
+						$result = $this->extract_generic_selected( $zip_file, $destination_directory, $items );					
+					}
+					break;
+				default:
+					$result = false;
+			}
+			
+			return $result;
+			
+		}
+
+		/**
+		 *	extract_generic_full()
+		 *
+		 *	Extracts the contents of a zip file to the specified directory using the best unzip methods possible.
 		 *
 		 *	@param	string		$zip_file					Full path & filename of ZIP file to extract from.
 		 *	@param	string		$destination_directory		Full directory path to extract into.
 		 *	@return	bool									true on success, false otherwise
 		 */
-		public function extract( $zip_file, $destination_directory = '' ) {
+		protected function extract_generic_full( $zip_file, $destination_directory = '' ) {
 		
 			$result = false;
 			$za = NULL;
@@ -1064,7 +971,7 @@ if ( !class_exists( "pluginbuddy_zbzippclzip" ) ) {
 			// TODO: Need a temporary directory that we can use for this
 			//define( 'PCLZIP_TEMPORARY_DIR', $tempdir );
 			
-			// This should give us a new archive object, of not catch it and bail out
+			// This should give us a new archive object, if not catch it and bail out
 			try {
 					
 				$za = new pluginbuddy_PclZip( $zip_file );
@@ -1116,6 +1023,203 @@ if ( !class_exists( "pluginbuddy_zbzippclzip" ) ) {
 		}
 
 		/**
+		 *	extract_generic_selected()
+		 *
+		 *	Extracts the contents of a zip file to the specified directory using the best unzip methods possible.
+		 *
+		 *	@param	string		$zip_file					Full path & filename of ZIP file to extract from.
+		 *	@param	string		$destination_directory		Full directory path to extract into.
+		 *	@param	array		$items						Mapping of what to extract and to what
+		 *	@return	bool									true on success (all extractions successful), false otherwise
+		 */
+		protected function extract_generic_selected( $zip_file, $destination_directory = '', $items ) {
+		
+			$result = false;
+			$za = NULL;
+			$stat = array();
+			
+			// This should give us a new archive object, if not catch it and bail out
+			try {
+			
+				$za = new pluginbuddy_PclZip( $zip_file );
+				$result = true;
+				
+			} catch ( Exception $e ) {
+			
+				// Something fishy - the methods indicated ziparchive but we couldn't find the class
+				$error_string = $e->getMessage();
+				pb_backupbuddy::status( 'details', sprintf( __('pclzip indicated as available method but error reported: %1$s','it-l10n-backupbuddy' ), $error_string ) );
+				$result = false;
+				
+			}
+			
+			// Only continue if we have a valid archive object
+			if ( true === $result ) {
+				
+				// Make sure we opened the zip ok and it has content
+				if ( ( $content_list = $za->listContent() ) !== 0 ) {
+				
+					// Now we need to take each item and run an unzip for it - unfortunately there is no easy way of combining
+					// arbitrary extractions into a single command if some might be to a 
+					foreach ( $items as $what => $where ) {
+			
+						$rename_required = false;
+						$result = false;
+				
+						// Decide how to extract based on where
+						if ( empty( $where) ) {
+					
+							// First we'll extract and junk the path
+							// Note: For some odd reason when we have a $what file that is a hidden (dot) file
+							// the file_exists() test in pclzip for the filepath to extract to returns true even
+							// though only the parent directory exists and not the file itself. No idea why at
+							// present. Because of that we have to use the PCL_ZIP_OPT_REPLACE_NEWER option
+							// so the fact the test returns true is ignored.
+							$extract_list = $za->extract( PCLZIP_OPT_PATH, $destination_directory, PCLZIP_OPT_BY_NAME, $what, PCLZIP_OPT_REMOVE_ALL_PATH, PCLZIP_OPT_REPLACE_NEWER );
+								
+							// Check whether we succeeded or not (would only be no list array for a zip file problem)
+							// but extraction of the file itself may still have failed
+							$result = ( $extract_list !== 0  && ( $extract_list[ 0 ][ 'status' ] == 'ok' ) );
+															
+						} elseif ( !empty( $where ) ) {
+					
+							if ( $what === $where ) {
+							
+								// Check for wildcard directory extraction like dir/* => dir/*
+								if ( "*" == substr( trim( $what ), -1 ) ) {
+
+									// Turn this into a preg_match pattern
+									$whatmatch = "|^" . $what . "|";									
+
+									// First we'll extract but we're not junking the paths
+									// Note: For some odd reason when we have a $what file that is a hidden (dot) file
+									// the file_exists() test in pclzip for the filepath to extract to returns true even
+									// though only the parent directory exists and not the file itself. No idea why at
+									// present. Because of that we have to use the PCL_ZIP_OPT_REPLACE_NEWER option
+									// so the fact the test returns true is ignored.
+									$extract_list = $za->extract( PCLZIP_OPT_PATH, $destination_directory, PCLZIP_OPT_BY_PREG, $whatmatch, PCLZIP_OPT_REPLACE_NEWER );
+
+									// Check whether we succeeded or not (would only be no list array for a zip file problem)
+									// but extraction of individual files themselves may still have failed
+									if ( 0 !== $extract_list ) {
+									
+										// So far so good - assume everything will be ok
+										$result = true;
+	
+										// At least we got no major failure so check the extracted files
+										foreach ( $extract_list as $file ) {
+										
+											if ( 'ok' !== $file[ 'status' ] ) {
+											
+												// Oops - we found a file that didn't extract ok so bail out with false
+												$result = false;
+												break;
+											
+											}
+										
+										}
+									
+									}
+								
+								} else {
+								
+									// It's just a single file extraction - breath a sign of relief
+									// Extract to same directory structure - don't junk path, no need to add where to destnation as automatic
+									// Note: For some odd reason when we have a $what file that is a hidden (dot) file
+									// the file_exists() test in pclzip for the filepath to extract to returns true even
+									// though only the parent directory exists and not the file itself. No idea why at
+									// present. Because of that we have to use the PCL_ZIP_OPT_REPLACE_NEWER option
+									// so the fact the test returns true is ignored.
+									$extract_list = $za->extract( PCLZIP_OPT_PATH, $destination_directory, PCLZIP_OPT_BY_NAME, $what, PCLZIP_OPT_REPLACE_NEWER );
+									
+									// Check whether we succeeded or not (would only be no list array for a zip file problem)
+									// but extraction of the file itself may still have failed
+									$result = ( $extract_list !== 0  && ( isset( $extract_list[ 0 ] ) ) && ( $extract_list[ 0 ][ 'status' ] == 'ok' ) );
+
+								}
+						
+							} else {
+
+								// First we'll extract and junk the path
+								// Note: For some odd reason when we have a $what file that is a hidden (dot) file
+								// the file_exists() test in pclzip for the filepath to extract to returns true even
+								// though only the parent directory exists and not the file itself. No idea why at
+								// present. Because of that we have to use the PCL_ZIP_OPT_REPLACE_NEWER option
+								// so the fact the test returns true is ignored.
+								$extract_list = $za->extract( PCLZIP_OPT_PATH, $destination_directory, PCLZIP_OPT_BY_NAME, $what, PCLZIP_OPT_REMOVE_ALL_PATH, PCLZIP_OPT_REPLACE_NEWER );
+																							
+								// Check whether we succeeded or not (would only be no list array for a zip file problem)
+								// but extraction of the file itself may still have failed
+								$result = ( $extract_list !== 0  && ( $extract_list[ 0 ][ 'status' ] == 'ok' ) );
+
+								// Will need to rename if the extract is ok
+								$rename_required = true;
+						
+							}
+					
+						}
+				
+						// Note: we don't open the file and then do stuff but it's all done in one action
+						// so we need to interpret the return code to dedide what to do
+						// Currently we can only distinguish between success and failure but no finer grain
+						if ( true === $result ) {
+					
+							pb_backupbuddy::status( 'details', sprintf( __('pclzip extracted file contents (%1$s from %2$s to %3$s%4$s)','it-l10n-backupbuddy' ), $what, $zip_file, $destination_directory, $where ) );
+
+							// Rename if we have to
+							if ( true === $rename_required) {
+							
+								// Note: we junked the path on the extraction so just the filename of $what is the source but
+								// $where could be a simple file name or a file path 
+								$result = $result && rename( $destination_directory . DIRECTORY_SEPARATOR . basename( $what ),
+															 $destination_directory . DIRECTORY_SEPARATOR . $where );
+							
+							}
+
+						} else {
+					
+							// For now let's just print the error code and drop through
+							$error_string = $za->errorInfo();
+							pb_backupbuddy::status( 'details', sprintf( __('pclzip failed to open/process file to extract file contents (%1$s from %2$s to %3$s%4$s) - Error Info: %5$s.','it-l10n-backupbuddy' ), $what, $zip_file, $destination_directory, $where, $error_string ) );
+					
+							// May seem redundant but belt'n'braces
+							$result = false;
+							
+						}
+					
+						// If the extraction failed (or rename after extraction) then break out of the foreach and simply return false
+						if ( false === $result ) {
+					
+							break;
+						
+						}
+					
+					}
+				
+				} else {
+				
+					// Couldn't open archive - will return for maybe another method to try
+					$error_string = $za->errorInfo( $result );
+					pb_backupbuddy::status( 'details', sprintf( __('pclzip failed to open file to extract contents (%1$s to %2$s) - Error Info: %3$s.','it-l10n-backupbuddy' ), $zip_file, $destination_directory, $error_string ) );
+
+					// Return an error code and a description - this needs to be handled more generically
+					//$result = array( 1, "Unable to get archive contents" );
+					// Currently as we are returning an array as a valid result we just return false on failure
+					$result = false;
+
+				}
+				
+				$za->close();
+			
+			}
+			
+		  	if ( NULL != $za ) { unset( $za ); }		
+			
+			return $result;
+			
+		}
+		
+		/**
 		 *	file_exists()
 		 *	
 		 *	Tests whether a file (with path) exists in the given zip file
@@ -1129,7 +1233,7 @@ if ( !class_exists( "pluginbuddy_zbzippclzip" ) ) {
 		 */
 		public function file_exists( $zip_file, $locate_file, $leave_open = false ) {
 		
-			$result = false;
+			$result = array( 1, "Generic failure indication" );
 			$za = NULL;
 			$stat = array();
 								
@@ -1193,7 +1297,7 @@ if ( !class_exists( "pluginbuddy_zbzippclzip" ) ) {
 					pb_backupbuddy::status( 'details', sprintf( __('pclzip failed to open file to check if file exists (looking for %1$s in %2$s) - Error Info: %3$s.','it-l10n-backupbuddy' ), $locate_file , $zip_file, $error_string ) );
 
 					// Return an error code and a description - this needs to be handled more generically
-					$result = array( 1, "Unable to get archive contents" );
+					$result = array( 1, "Failed to open/process file" );
 
 				}
 							

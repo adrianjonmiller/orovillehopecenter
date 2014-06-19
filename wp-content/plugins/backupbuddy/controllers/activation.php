@@ -137,12 +137,6 @@ if ( $options !== false ) {
 		unset( pb_backupbuddy::$options['import_password'] );
 	}
 	
-	if ( isset( pb_backupbuddy::$options['repairbuddy_password'] ) ) { // Migrate repair password to just hash.
-		pb_backupbuddy::$options['repairbuddy_pass_length'] = strlen( pb_backupbuddy::$options['repairbuddy_password'] );
-		pb_backupbuddy::$options['repairbuddy_pass_hash'] = md5( pb_backupbuddy::$options['repairbuddy_password'] );
-		unset( pb_backupbuddy::$options['repairbuddy_password'] );
-	}
-	
 	// Migrate email_notify_scheduled -> email_notify_scheduled_complete
 	pb_backupbuddy::$options['email_notify_scheduled_complete'] = pb_backupbuddy::$options['email_notify_scheduled'];
 	
@@ -188,7 +182,7 @@ if ( $needs_saving === true ) {
 
 
 // ********** BEGIN 3.1.8.2 -> 3.1.8.3 DATA MIGRATION **********
-if ( pb_backupbuddy::$options['data_version'] == '3' ) {
+if ( pb_backupbuddy::$options['data_version'] < 4 ) {
 	pb_backupbuddy::$options['data_version'] = '4'; // Update data structure version to 4.
 	pb_backupbuddy::$options['role_access'] = 'activate_plugins'; // Change default role from `administrator` to `activate_plugins` capability.
 	pb_backupbuddy::save();
@@ -198,21 +192,115 @@ if ( pb_backupbuddy::$options['data_version'] == '3' ) {
 
 
 // ********** BEGIN 3.3.0 -> 3.3.0.1 BACKUP DATASTRUCTURE OPTIONS to FILEOPTIONS MIGRATION **********
-if ( isset( pb_backupbuddy::$options['backups'] ) && ( count( pb_backupbuddy::$options['backups'] ) > 0 ) ) {
-	pb_backupbuddy::anti_directory_browsing( pb_backupbuddy::$options['log_directory'] . 'fileoptions/' );
-	require_once( pb_backupbuddy::plugin_path() . '/classes/fileoptions.php' );
-	foreach( pb_backupbuddy::$options['backups'] as $serial => $backup ) {
-		$backup_options = new pb_backupbuddy_fileoptions( pb_backupbuddy::$options['log_directory'] . 'fileoptions/' . $serial . '.txt', $read_only = false, $ignore_lock = false, $create_file = true );
-		$backup_options->options = $backup;
-		if ( true === $backup_options->save() ) {
-			unset( pb_backupbuddy::$options['backups'][$serial] );
+if ( pb_backupbuddy::$options['data_version'] < 5 ) {
+	if ( isset( pb_backupbuddy::$options['backups'] ) && ( count( pb_backupbuddy::$options['backups'] ) > 0 ) ) {
+		pb_backupbuddy::anti_directory_browsing( backupbuddy_core::getLogDirectory() . 'fileoptions/' );
+		require_once( pb_backupbuddy::plugin_path() . '/classes/fileoptions.php' );
+		foreach( pb_backupbuddy::$options['backups'] as $serial => $backup ) {
+			$backup_options = new pb_backupbuddy_fileoptions( backupbuddy_core::getLogDirectory() . 'fileoptions/' . $serial . '.txt', $read_only = false, $ignore_lock = false, $create_file = true );
+			$backup_options->options = $backup;
+			if ( true === $backup_options->save() ) {
+				unset( pb_backupbuddy::$options['backups'][$serial] );
+			}
+			unset( $backup_options );
 		}
-		unset( $backup_options );
 	}
+	pb_backupbuddy::$options['data_version'] = '5';
+	pb_backupbuddy::save();
 }
-pb_backupbuddy::$options['data_version'] = '5';
-pb_backupbuddy::save();
 // ********** END 3.3.0 -> 3.3.0.1 BACKUP DATASTRUCTURE OPTIONS to FILEOPTIONS MIGRATION **********
+
+
+
+
+
+// ********** BEGIN 4.0 UPGRADE **********
+if ( pb_backupbuddy::$options['data_version'] < 6 ) {
+	// Migrate profile-specific settings into 'Defaults' key profile.
+	pb_backupbuddy::$options['profiles'][0]['skip_database_dump'] = pb_backupbuddy::$options['skip_database_dump'];
+	unset( pb_backupbuddy::$options['skip_database_dump'] );
+	pb_backupbuddy::$options['profiles'][0]['backup_nonwp_tables'] = pb_backupbuddy::$options['backup_nonwp_tables'];
+	unset( pb_backupbuddy::$options['backup_nonwp_tables'] );
+	pb_backupbuddy::$options['profiles'][0]['integrity_check'] = pb_backupbuddy::$options['integrity_check'];
+	unset( pb_backupbuddy::$options['integrity_check'] );
+
+	// Unset repairbuddy pass stuff as it now just uses same as importbuddy.
+	if ( isset( pb_backupbuddy::$options['repairbuddy_pass_hash'] ) ) {
+		unset( pb_backupbuddy::$options['repairbuddy_pass_hash'] );
+	}
+	if ( isset( pb_backupbuddy::$options['repairbuddy_pass_length'] ) ) {
+		unset( pb_backupbuddy::$options['repairbuddy_pass_length'] );
+	}
+
+	// Changing some names.
+	pb_backupbuddy::$options['last_backup_start'] = pb_backupbuddy::$options['last_backup'];
+	pb_backupbuddy::$options['last_backup_finish'] = pb_backupbuddy::$options['last_backup'];
+	unset( pb_backupbuddy::$options['last_backup'] );
+
+	// Existing chedules need profiles assigned.
+	foreach( pb_backupbuddy::$options['schedules'] as &$schedule ) {
+		if ( !isset( $schedule['profile'] ) || ( $schedule['profile'] == '' ) ) { // No profile set.
+			if ( $schedule['type'] == 'db' ) {
+				$schedule['profile'] = '1';
+			}
+			if ( $schedule['type'] == 'full' ) {
+				$schedule['profile'] = '2';
+			}
+			unset( $schedule['type'] );
+		}
+	}
+	
+	pb_backupbuddy::$options['data_version'] = '6';
+	pb_backupbuddy::save();
+}
+if ( pb_backupbuddy::$options['data_version'] < 7 ) {
+	pb_backupbuddy::$options['data_version'] = '7';
+	if ( isset( pb_backupbuddy::$options['excludes'] ) ) {
+		pb_backupbuddy::$options['profiles'][0]['excludes'] = pb_backupbuddy::$options['excludes'];
+	}
+	unset( pb_backupbuddy::$options['excludes'] );
+	pb_backupbuddy::save();
+}
+// ********** END 4.0 UPGRADE **********
+
+
+
+
+
+// ********** BEGIN 4.2 UPGRADE **********
+if ( pb_backupbuddy::$options['data_version'] < 8 ) {
+	pb_backupbuddy::$options['data_version'] = '8';
+	
+	// Update backup dir.
+	$default_backup_dir = ABSPATH . 'wp-content/uploads/backupbuddy_backups/';
+	if ( pb_backupbuddy::$options['backup_directory'] == $default_backup_dir ) { // If backup dir is in the default location, set blank.
+		pb_backupbuddy::$options['backup_directory'] = '';
+	}
+	
+	// Update temp dir.
+	pb_backupbuddy::$options['temp_directory'] = ''; // Default blank. This is currently always hard-coded relative to site root.
+	
+	// Update log dir.
+	$uploads_dirs = wp_upload_dir();
+	$new_default_log_dir = $uploads_dirs['basedir'] . '/pb_backupbuddy/';
+	if ( pb_backupbuddy::$options['log_directory'] == $new_default_log_dir ) { // If log dir is in the new default location, set blank.
+		pb_backupbuddy::$options['log_directory'] = '';
+	}
+	unset( $uploads_dirs );
+	unset( $new_default_log_dir );
+	
+	pb_backupbuddy::save();
+}
+// ********** END 4.2 UPGRADE **********
+
+// ********** BEGIN 4.2.14.22 UPGRADE **********
+if ( isset( pb_backupbuddy::$options['rollback_beta'] ) ) {
+	unset( pb_backupbuddy::$options['rollback_beta'] );
+	pb_backupbuddy::save();
+}
+// ********** END 4.2.14.22 UPGRADE **********
+
+
 
 
 
@@ -242,7 +330,7 @@ if ( '0' === pb_backupbuddy::$options[ 'zip_method_strategy' ] ) {
 
 // Schedule daily housekeeping.
 if ( false === wp_next_scheduled( pb_backupbuddy::cron_tag( 'housekeeping' ) ) ) { // if schedule does not exist...
-	pb_backupbuddy::$classes['core']->schedule_event( time() + ( 60*60 * 2 ), 'daily', pb_backupbuddy::cron_tag( 'housekeeping' ), array() ); // Add schedule.
+	backupbuddy_core::schedule_event( time() + ( 60*60 * 2 ), 'daily', pb_backupbuddy::cron_tag( 'housekeeping' ), array() ); // Add schedule.
 }
 
 

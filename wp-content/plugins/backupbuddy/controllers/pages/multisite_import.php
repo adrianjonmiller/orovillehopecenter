@@ -1,8 +1,8 @@
 <?php
 
-pb_backupbuddy::$ui->title( 'Multisite Import Site (BETA)' . ' ' . pb_backupbuddy::video( '4RmC5nLmabE', __('Multisite import', 'it-l10n-backupbuddy' ), false ) );
+pb_backupbuddy::$ui->title( 'Multisite Import Site (EXPERIMENTAL)' . ' ' . pb_backupbuddy::video( '4RmC5nLmabE', __('Multisite import', 'it-l10n-backupbuddy' ), false ) );
 
-pb_backupbuddy::$classes['core']->versions_confirm();
+backupbuddy_core::versions_confirm();
 
 pb_backupbuddy::set_status_serial( 'ms_import' );
 
@@ -128,7 +128,7 @@ class pluginbuddy_ms_import {
 	}
 	
 	function load_backup_dat() {
-		$dat_file = $this->import_options[ 'extract_to' ] . '/wp-content/uploads/backupbuddy_temp/' . $this->import_options[ 'zip_id' ] . '/backupbuddy_dat.php';
+		$dat_file = $this->import_options[ 'extract_to' ] . '/' . str_replace( ABSPATH, '', backupbuddy_core::getTempDirectory() ) . $this->import_options[ 'zip_id' ] . '/backupbuddy_dat.php';
 		$this->_backupdata = $this->get_backup_dat( $dat_file );
 	}
 	
@@ -137,7 +137,7 @@ class pluginbuddy_ms_import {
 		require_once( pb_backupbuddy::plugin_path() . '/classes/import.php' );
 		$import = new pb_backupbuddy_import();
 		
-		return $import->get_dat_file_array( $dat_file );
+		return backupbuddy_core::get_dat_file_array( $dat_file );
 	}
 	
 	
@@ -196,31 +196,16 @@ class pluginbuddy_ms_import {
 		$status_lines = pb_backupbuddy::get_status( 'ms_import', true, true, true ); // $serial = '', $clear_retrieved = true, $erase_retrieved = true, $hide_getting_status = false
 		if ( $status_lines !== false ) { // Only add lines if there is status contents.
 			foreach( $status_lines as $status_line ) {
-				$status_line[0] = pb_backupbuddy::$format->date( pb_backupbuddy::$format->localize_time( $status_line[0] ) );
-				$status_line[1] .= 'sec';
-				$status_line[2] .= 'MB';
-				echo '<script type="text/javascript">jQuery( "#importbuddy_status" ).append( "\n' . implode( "\t", $status_line ) . '");	textareaelem = document.getElementById( "importbuddy_status" );	textareaelem.scrollTop = textareaelem.scrollHeight;	</script>';
+				$status_line = json_decode( $status_line, true );
+				$status_line['time'] = pb_backupbuddy::$format->date( pb_backupbuddy::$format->localize_time( $status_line['time'] ) );
+				$status_line['run'] .= 'sec';
+				$status_line['mem'] .= 'MB';
+				echo '<script type="text/javascript">jQuery( "#importbuddy_status" ).append( "\n' . 
+					$status_line['time'] . "\t" . $status_line['run'] . "\t" . $status_line['mem'] . "\t" . $status_line['event'] . "\t" . $status_line['data']
+				 . '");	textareaelem = document.getElementById( "importbuddy_status" );	textareaelem.scrollTop = textareaelem.scrollHeight;	</script>';
 				pb_backupbuddy::flush();
 			}
 		}
-		
-		
-		
-		/*
-		$message = htmlentities( addslashes( $message ) );
-		$status = date( $this->_parent->_parent->_timestamp, time() ) . ': ' . $message;
-		
-		echo '<script type="text/javascript">jQuery( "#importbuddy_status" ).append( "\n' . $status . '");	textareaelem = document.getElementById( "importbuddy_status" );	textareaelem.scrollTop = textareaelem.scrollHeight;	</script>';
-		pb_backupbuddy::flush();
-		
-		if ( $type == 'error' ) {
-			$this->log( $message, 'error' );
-		} elseif ( $type == 'warning' ) {
-			$this->log( $message, 'warning' );
-		} else {
-			$this->log( '[' . $type . ']' . $message, 'all' );
-		}
-		*/
 	}
 	
 	

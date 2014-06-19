@@ -304,7 +304,7 @@ class pb_backupbuddy_form {
 		}
 		
 		
-		$return = '<form method="post" action="' . $action_url . '" id="' . $this->_prefix . $this->_form_name . '_form">';
+		$return = '<form method="post" action="' . $action_url . '" class="pb_form" id="' . $this->_prefix . $this->_form_name . '_form">';
 		$return .= '<input type="hidden" name="' . $this->_prefix . '" value="' . $this->_form_name . '">';
 		return $return;
 	} // End start().
@@ -388,7 +388,7 @@ class pb_backupbuddy_form {
 			if ( $input['type'] == 'text' ) {
 				
 				
-				$return .= '<input type="text" class="' . $classes . '" name="' . $prefix . $name . '" value="' . $input['value'] . '" id="' . $prefix . $name . '"' . $css . '>';
+				$return .= '<input type="text" class="' . $classes . '" name="' . $prefix . $name . '" value="' . $input['value'] . '" id="' . $prefix . str_replace( '#', '__', $name ) . '"' . $css . '>';
 				
 				
 			/********** PLAINTEXT **********/
@@ -434,14 +434,14 @@ class pb_backupbuddy_form {
 					$css = ' style="width: 60px;"';
 				}
 				
-				$return .= '<input class="pb_colorpicker ' . $classes . '" type="text" name="' . $prefix . $name . '" value="' . $input['value'] . '" id="' . $prefix . $name . '"' . $css . '>';
+				$return .= '<input class="pb_colorpicker ' . $classes . '" type="text" name="' . $prefix . $name . '" value="' . $input['value'] . '" id="' . $prefix . str_replace( '#', '__', $name ) . '"' . $css . '>';
 				
 				
 			/********** HIDDEN **********/
 			} elseif ( $input['type'] == 'hidden' ) {
 				
 				
-				$return .= '<input type="hidden" name="' . $prefix . $name . '" value="' . $input['value'] . '" class="' . $classes . '" id="' . $prefix . $name . '"' . $css . '>';
+				$return .= '<input type="hidden" name="' . $prefix . $name . '" value="' . $input['value'] . '" class="' . $classes . '" id="' . $prefix . str_replace( '#', '__', $name ) . '"' . $css . '>';
 				
 				
 			/********** WYSIWYG **********/
@@ -469,21 +469,21 @@ class pb_backupbuddy_form {
 			} elseif ( $input['type'] == 'textarea' ) {
 				
 				
-				$return .= '<textarea name="' . $prefix . $name . '" class="' . $classes . '" id="' . $prefix . $name . '"' . $css . '>' . $input['value'] . '</textarea>';
+				$return .= '<textarea name="' . $prefix . $name . '" class="' . $classes . '" id="' . $prefix . str_replace( '#', '__', $name ) . '"' . $css . '>' . $input['value'] . '</textarea>';
 				
 				
 			/********** PASSWORD **********/
 			} elseif ( $input['type'] == 'password' ) {
 				
 				
-				$return .= '<input type="password" name="' . $prefix . $name . '" value="' . $input['value'] . '" class="' . $classes . '" id="' . $prefix . $name . '"' . $css . '>';
+				$return .= '<input type="password" name="' . $prefix . $name . '" value="' . $input['value'] . '" class="' . $classes . '" id="' . $prefix . str_replace( '#', '__', $name ) . '"' . $css . '>';
 				
 				
 			/********** SELECT **********/
 			} elseif ( $input['type'] == 'select' ) {
 				
 				
-				$return .= '<select name="' . $prefix . $name . '" class="' . $classes . '" id="' . $prefix . $name . '"' . $css . '>';
+				$return .= '<select name="' . $prefix . $name . '" class="' . $classes . '" id="' . $prefix . str_replace( '#', '__', $name ) . '"' . $css . '>';
 				foreach ( $input['options'] as $option_value => $option_title ) {
 					$return .= '<option value="' . $option_value . '"';
 					if ( $option_value == $input['value'] ) { $return .= ' selected="selected"'; }
@@ -500,7 +500,7 @@ class pb_backupbuddy_form {
 				$i = 0;
 				foreach ( $input['options'] as $option_value => $option_title ) {
 					$i++;
-					$return .= '<input type="radio" name="' . $prefix . $name . '" class="' . $classes . '" id="' . $prefix . $name . '" value="' . $option_value . '"' . $css;
+					$return .= '<input type="radio" name="' . $prefix . $name . '" class="' . $classes . '" id="' . $prefix . str_replace( '#', '__', $name ) . '" value="' . $option_value . '"' . $css;
 					
 					if ( $option_value == $input['value'] ) { // Check if this item is selected.
 						$return .= ' checked="checked"';
@@ -521,7 +521,7 @@ class pb_backupbuddy_form {
 				
 				
 				$return .= '<input type="hidden" name="' . $prefix . $name . '" value="' . $input['options']['unchecked'] . '">';
-				$return .= '<input type="checkbox" name="' . $prefix . $name . '" class="' . $classes . '" id="' . $prefix . $name . '" value="' . $input['options']['checked'] . '"' . $css;
+				$return .= '<input type="checkbox" name="' . $prefix . $name . '" class="' . $classes . '" id="' . $prefix . str_replace( '#', '__', $name ) . '" value="' . $input['options']['checked'] . '"' . $css;
 				if ( $input['options']['checked'] == $input['value'] ) {
 					$return .= ' checked';
 				}
@@ -533,7 +533,7 @@ class pb_backupbuddy_form {
 			} elseif ( $input['type'] == 'submit' ) {
 				
 				
-				$return .= '<input class="button-primary ' . $classes . '" type="submit" name="' . $prefix . $name . '" value="' . $input['value'] . '" id="' . $prefix . $name . '"' . $css . '>';
+				$return .= '<input class="button-primary ' . $classes . '" type="submit" name="' . $prefix . $name . '" value="' . $input['value'] . '" id="' . $prefix . str_replace( '#', '__', $name ) . '"' . $css . '>';
 				
 				
 			/********** ~UNKNOWN TYPE~ **********/
@@ -630,7 +630,7 @@ class pb_backupbuddy_form {
 	 *											Ex: $callbacks = array( 'phone' => array( $this, 'my_phone_validator' ) );
 	 *	@return		true/array					true on success; array of error(s) encountered on failure.
 	 */
-		function test_rule( $ruleset, $value ) {
+	function test_rule( $ruleset, $value ) {
 		$errors = array();
 		if ( $ruleset == '' ) {
 			return true;
@@ -680,20 +680,23 @@ class pb_backupbuddy_form {
 			/* ***** INT TYPE *****
 			 * make sure that the value fits inside of bounds
 			 * make sure it doesn't include a decimal
+			 * accepts blank value
 			 * */
 			} elseif ( $rule_type == 'int' ) {
-				if( !is_numeric( $value ) || strpos($value, '.') !== false ) {
-					$errors[] = '`' . htmlentities( $value ) . '` is not a valid number.';
-				} else {
-						$subrule = strstr( $rule, '[' );
-						$hyphen_pos = strpos( $subrule, '-' );
-						if( $hyphen_pos != '' ) {
-							$first_number = substr( $subrule, 1, $hyphen_pos - 1 );
-							$second_number = substr( $subrule, $hyphen_pos + 1, -1 );
-							if( $value < $first_number || $value > $second_number ) {
-								$errors[] = 'Value `' . htmlentities( $value ) . '` is outside of the set bounds.';
+				if ( '' != $value ) {
+					if( !is_numeric( $value ) || strpos($value, '.') !== false ) {
+						$errors[] = '`' . htmlentities( $value ) . '` is not a valid number.';
+					} else {
+							$subrule = strstr( $rule, '[' );
+							$hyphen_pos = strpos( $subrule, '-' );
+							if( $hyphen_pos != '' ) {
+								$first_number = substr( $subrule, 1, $hyphen_pos - 1 );
+								$second_number = substr( $subrule, $hyphen_pos + 1, -1 );
+								if( $value < $first_number || $value > $second_number ) {
+									$errors[] = 'Value `' . htmlentities( $value ) . '` is outside of the set bounds.';
+								}
 							}
-						}
+					}
 				}
 			
 			
@@ -701,11 +704,12 @@ class pb_backupbuddy_form {
 			 * validate to make sure the e-mail address is actually an e-mail address.
 			 * */
 			} elseif ( $rule_type == 'email' ) {
-				// TODO: Add custom callback functionality here.
-				if( !filter_var( $value, FILTER_VALIDATE_EMAIL ) ) {
-					$errors[] = 'Value `' . htmlentities( $value ) . '` is not a valid e-mail address.';
+				if ( '' != $value ) {
+					// TODO: Add custom callback functionality here.
+					if( !filter_var( $value, FILTER_VALIDATE_EMAIL ) ) {
+						$errors[] = 'Value `' . htmlentities( $value ) . '` is not a valid e-mail address.';
+					}
 				}
-			
 			
 			
 			/* ***** SET TYPE *****

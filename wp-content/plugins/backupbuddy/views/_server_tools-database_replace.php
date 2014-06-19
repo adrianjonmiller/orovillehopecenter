@@ -1,27 +1,45 @@
 <?php
 if ( !is_admin() ) { die( 'Access Denied.' ); }
 
+global $wpdb;
+
+echo '<a name="database_replace"></a>';
+
 echo '<p><b>Warning: This is an advanced feature. Use with caution; improper use may result in data loss.</b></p>';
 if ( pb_backupbuddy::_GET( 'database_replace' ) == '1' ) {
 	
 	global $pb_backupbuddy_js_status;
 	$pb_backupbuddy_js_status = true;
 	
+	?>
+	<script type="text/javascript">
+			function pb_status_append( status_string ) {
+				target_id = 'pb_backupbuddy_status'; // importbuddy_status or pb_backupbuddy_status
+				if( jQuery( '#' + target_id ).length == 0 ) { // No status box yet so suppress.
+					return;
+				}
+				jQuery( '#' + target_id ).append( "\n" + status_string );
+				textareaelem = document.getElementById( target_id );
+				textareaelem.scrollTop = textareaelem.scrollHeight;
+			}
+		</script>
+	<?php
+	
 	echo pb_backupbuddy::status_box( 'Mass replacing in database with Server Tools from BackupBuddy v' . pb_backupbuddy::settings( 'version' ) . '...' );
-	echo '<div id="pb_importbuddy_working"><img src="' . pb_backupbuddy::plugin_url() . '/images/loading_large.gif" title="Working... Please wait as this may take a moment..."></div>';
+	//echo '<div id="pb_backupbuddy_replace_working"><img src="' . pb_backupbuddy::plugin_url() . '/images/loading_large.gif" title="Working... Please wait as this may take a moment..."></div>';
 	
 	// Instantiate database replacement class.
 	require_once( pb_backupbuddy::plugin_path() . '/lib/dbreplace/dbreplace.php' );
 	$dbreplace = new pluginbuddy_dbreplace();
 	
 	// Set up variables by getting POST data.
-	$needle = mysql_real_escape_string( pb_backupbuddy::_POST( 'needle' ) );
+	$needle = backupbuddy_core::dbEscape( pb_backupbuddy::_POST( 'needle' ) );
 	if ( $needle == '' ) {
 		echo '<b>Error #4456582. Missing needle. You must enter text to search for.';
-		echo '<br><a href="' . pb_backupbuddy::page_url() . '#database_replace" class="button secondary-button">&larr; ' .  __( 'back', 'it-l10n-backupbuddy' ) . '</a>';
+		echo '<br><a href="' . pb_backupbuddy::page_url() . '&tab=1#database_replace" class="button secondary-button">&larr; ' .  __( 'back', 'it-l10n-backupbuddy' ) . '</a>';
 		return;
 	}
-	$replacement = mysql_real_escape_string( pb_backupbuddy::_POST( 'replacement' ) );
+	$replacement = backupbuddy_core::dbEscape( pb_backupbuddy::_POST( 'replacement' ) );
 	pb_backupbuddy::status( 'message', 'Replacing `' . $needle . '` with `' . $replacement . '`.' );
 	/*
 	if ( pb_backupbuddy::_POST( 'maybe_serialized' ) == 'true' ) {
@@ -33,16 +51,17 @@ if ( pb_backupbuddy::_GET( 'database_replace' ) == '1' ) {
 	}
 	*/
 	
+	
 	// Replace based on the type of table replacement selected.
 	if ( pb_backupbuddy::_POST( 'table_selection' ) == 'all' ) { // All tables.
 		pb_backupbuddy::status( 'message', 'Replacing in all tables based on settings.' );
 		
 		$tables = array();
-		$result = mysql_query( 'SHOW TABLES' );
-		while( $rs = mysql_fetch_row( $result ) ) {
-			$tables[] = $rs[0];
+		$rows = $wpdb->get_results( "SELECT table_name FROM information_schema.tables WHERE table_schema = DATABASE()", ARRAY_A );
+		foreach( $rows as $row ) {
+			$tables[] = $row['table_name'];
 		}
-		mysql_free_result( $result ); // Free memory.
+		unset( $rows );
 		$rows_changed = 0;
 		foreach( $tables as $table ) {
 			pb_backupbuddy::status( 'message', 'Replacing in table `' . $table . '`.' );
@@ -52,21 +71,21 @@ if ( pb_backupbuddy::_GET( 'database_replace' ) == '1' ) {
 		
 		pb_backupbuddy::status( 'message', 'Replacement finished.' );
 	} elseif ( pb_backupbuddy::_POST( 'table_selection' ) == 'single_table' ) {
-		$table = mysql_real_escape_string( pb_backupbuddy::_POST( 'table' ) ); // Single specified table.
+		$table = backupbuddy_core::dbEscape( pb_backupbuddy::_POST( 'table' ) ); // Single specified table.
 		pb_backupbuddy::status( 'message', 'Replacing in single table `' . $table . '` based on settings.' );
 		$dbreplace->bruteforce_table( $table, array( $needle ), array( $replacement ) );
 		pb_backupbuddy::status( 'message', 'Replacement finished.' );
 	} elseif ( pb_backupbuddy::_POST( 'table_selection' ) == 'prefix' ) { // Matching table prefix.
-		$prefix = mysql_real_escape_string( pb_backupbuddy::_POST( 'table_prefix' ) );
+		$prefix = backupbuddy_core::dbEscape( pb_backupbuddy::_POST( 'table_prefix' ) );
 		pb_backupbuddy::status( 'message', 'Replacing in all tables matching prefix `' . $prefix . '`.' );
 		
 		$tables = array();
 		$escaped_prefix = str_replace( '_', '\_', $prefix );
-		$result = mysql_query( "SHOW TABLES LIKE '{$escaped_prefix}%'" );
-		while( $rs = mysql_fetch_row( $result ) ) {
-			$tables[] = $rs[0];
+		$rows = $wpdb->get_results( "SELECT table_name FROM information_schema.tables WHERE table_name LIKE '{$escaped_prefix}%' AND table_schema = DATABASE()", ARRAY_A );
+		foreach( $rows as $row ) {
+			$tables[] = $row['table_name'];
 		}
-		mysql_free_result( $result ); // Free memory.
+		unset( $rows );
 		$rows_changed = 0;
 		foreach( $tables as $table ) {
 			pb_backupbuddy::status( 'message', 'Replacing in table `' . $table . '`.' );
@@ -79,7 +98,7 @@ if ( pb_backupbuddy::_GET( 'database_replace' ) == '1' ) {
 		die( 'Error #4456893489349834. Unknown method.' );
 	}
 	
-	echo '<br><a href="' . pb_backupbuddy::page_url() . '#database_replace" class="button secondary-button">&larr; ' .  __( 'back', 'it-l10n-backupbuddy' ) . '</a>';
+	echo '<br><a href="' . pb_backupbuddy::page_url() . '&tab=1#database_replace" class="button secondary-button">&larr; ' .  __( 'back', 'it-l10n-backupbuddy' ) . '</a>';
 	
 	$pb_backupbuddy_js_status = false;
 	return;
@@ -105,21 +124,21 @@ global $table_prefix;
 $prefixes[] = $table_prefix;
 
 // Calculate prefixes foudn in this database. Does not handle multiple-underscore
-$result = mysql_query( 'SHOW TABLES' );
-while( $rs = mysql_fetch_row( $result ) ) {
-	$tables[] = $rs[0];
+$rows = $wpdb->get_results( "SELECT table_name FROM information_schema.tables WHERE table_schema = DATABASE()", ARRAY_A );
+foreach( $rows as $row ) {
+	$tables[] = $row['table_name'];
 	
-	if ( preg_match( '/[a-zA-Z0-9]*_([0-9]+_)*/i', $rs[0], $matches ) ) {
+	if ( preg_match( '/[a-zA-Z0-9]*_([0-9]+_)*/i', $row['table_name'], $matches ) ) {
 		$prefixes[] = $matches[0];
 	}
 }
-mysql_free_result( $result ); // Free memory.
+unset( $rows );
 
 $prefixes = array_unique( $prefixes );
 natsort( $prefixes );
 ?>
 <div>
-	<form action="<?php echo pb_backupbuddy::page_url();?>&database_replace=1#pb_backupbuddy_getting_started_tab_tools" method="post">
+	<form action="<?php echo pb_backupbuddy::page_url();?>&database_replace=1&tab=1#database_replace" method="post">
 		<input type="hidden" name="action" value="replace">
 		
 		<h4>Replace <?php pb_backupbuddy::tip( 'Text you want to be searched for and replaced. Everything in the box is considered one match and may span multiple lines.' ); ?></h4>

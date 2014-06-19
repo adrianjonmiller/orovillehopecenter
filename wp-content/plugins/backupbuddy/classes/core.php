@@ -2,23 +2,59 @@
 // Helper functions for BackupBuddy.
 // TODO: Eventually break out of a lot of these from BB core. Migrating from old framework to new resulted in this mid-way transition but it's a bit messy...
 
-class pb_backupbuddy_core {
-	
-	
-	var $warn_plugins = array(
+class backupbuddy_core {
+
+	const MAX_SECONDS_TO_KEEP_ORPHANED_FILEOPTIONS_FILES = 2592000; // 30 days - Once this time has passed then the housekeeping cleanup function will be given the go-ahead to delete fileoptions files that have no local backup zip file that matches their serial. We keep these for a while so the Recent Backups page will keep them in its list.
+
+
+	public static $warn_plugins = array(
 		'w3-total-cache.php' => 'W3 Total Cache',
 		'wp-cache.php' => 'WP Super Cache',
 	);
-	
-	
+
+
+	public static function prettyFunctionTitle( $function, $args = '' ) {
+
+		if ( $function == 'backup_create_database_dump' ) {
+			$functionTitle = 'Backing up database';
+			if ( '' != $args ) {
+				$subFunctionTitle = 'Tables: ' . implode( ', ', $args[0] );
+			}
+		} elseif ( $function == 'backup_zip_files' ) {
+			$functionTitle = 'Zipping up files';
+		} elseif ( $function == 'integrity_check' ) {
+			$functionTitle = 'Verifying backup file integrity';
+		} elseif ( $function == 'post_backup' ) {
+			$functionTitle = 'Cleaning up';
+		} elseif ( $function == 'ms_download_extract_wordpress' ) {
+			$functionTitle = 'Downloading WordPress core files from wordpress.org';
+		} elseif ( $function == 'ms_create_wp_config' ) {
+			$functionTitle = 'Generating standard wp-config.php for export';
+		} elseif ( $function == 'ms_copy_plugins' ) {
+			$functionTitle = 'Copying plugins';
+		} elseif ( $function == 'ms_copy_themes' ) {
+			$functionTitle = 'Copying themes';
+		} elseif ( $function == 'ms_copy_media' ) {
+			$functionTitle = 'Copying media';
+		} elseif ( $function == 'ms_copy_users_table' ) {
+			$functionTitle = 'Copying users';
+		} elseif ( $function == 'ms_cleanup' ) {
+			$functionTitle = 'Cleaning up Multisite-specific temporary data';
+		} else {
+			$functionTitle = $function;
+		}
+
+		return $functionTitle;
+	} // end prettyFunctionTitle().
+
 	/*	is_network_activated()
 	 *	
 	 *	Returns a boolean indicating whether a plugin is network activated or not.
 	 *	
 	 *	@return		boolean			True if plugin is network activated, else false.
 	 */
-	function is_network_activated() {
-		
+	public static function is_network_activated() {
+
 		if ( !function_exists( 'is_plugin_active_for_network' ) ) { // Function is not available on all WordPress pages for some reason according to codex.
 			require_once( ABSPATH . '/wp-admin/includes/plugin.php' );
 		}
@@ -27,11 +63,11 @@ class pb_backupbuddy_core {
 		} else {
 			return false;
 		}
-		
+
 	} // End is_network_activated().
-	
-	
-	
+
+
+
 	/*	backup_integrity_check()
 	 *	
 	 *	Scans a backup file and saves the result in data structure. Checks for key files & that .zip can be read properly. Stores results with details in data structure.
@@ -39,46 +75,60 @@ class pb_backupbuddy_core {
 	 *	@param		string		$file			Full pathname & filename to backup file to check.
 	 *	@param		obj			$fileoptions	fileoptions object currently holding the fileoptions file open, if any.
 	 *	@param		array 		$options		Array of options.
-	 *	@return		boolean						True if integrity 100% passed, else false. ( Side note: Result details stored in fileoptions 'integrity' key in array.
+	 *	@return		array						Returns integrity data array.
 	 */
-	function backup_integrity_check( $file, $fileoptions = '', $options = array() ) {
-		
+	public static function backup_integrity_check( $file, $fileoptions = '', $options = array(), $skipLogRedirect = false ) {
+
+		pb_backupbuddy::status( 'details', 'Started backup_integrity_check() function.' );
+		$serial = self::get_serial_from_file( $file );
+
+		// User selected to rescan a file.
+		if ( pb_backupbuddy::_GET( 'reset_integrity' ) == $serial ) {
+			pb_backupbuddy::alert( 'Rescanning backup integrity for backup file `' . basename( $file ) . '`' );
+			pb_backupbuddy::flush();
+		}
+
+
 		$options = array_merge(
 			array(
 				'skip_database_dump' => '0',
 			),
 			$options
 		);
-		
-		pb_backupbuddy::status( 'details', 'Started backup_integrity_check() function.' );
-		$serial = $this->get_serial_from_file( $file );
-		
-		// User selected to rescan a file.
-		if ( pb_backupbuddy::_GET( 'reset_integrity' ) == $serial ) {
-			pb_backupbuddy::alert( 'Rescanning backup integrity for backup file `' . basename( $file ) . '`' );
-		}
-		
+
+		$scan_notes = array();
+
+
+		// Get backup fileoptions.
 		if ( $fileoptions != '' ) {
 			$backup_options = &$fileoptions;
 		} else {
 			require_once( pb_backupbuddy::plugin_path() . '/classes/fileoptions.php' );
-			$backup_options = new pb_backupbuddy_fileoptions( pb_backupbuddy::$options['log_directory'] . 'fileoptions/' . $serial . '.txt', $read_only = false, $ignore_lock = false, $create_file = true ); // Will create file to hold integrity data if nothing exists.
+			$backup_options = new pb_backupbuddy_fileoptions( backupbuddy_core::getLogDirectory() . 'fileoptions/' . $serial . '.txt', $read_only = false, $ignore_lock = false, $create_file = true ); // Will create file to hold integrity data if nothing exists.
 			if ( true !== ( $result = $backup_options->is_ok() ) ) {
-				pb_backupbuddy::status( 'error', __('Fatal Error #9034 C. Unable to access fileoptions data.', 'it-l10n-backupbuddy' ) . ' Error on file `' . pb_backupbuddy::$options['log_directory'] . 'fileoptions/' . $serial . '.txt' . '`: ' . $result );
-				pb_backupbuddy::status( 'action', 'halt_script' ); // Halt JS on page.
+				pb_backupbuddy::status( 'error', __('Fatal Error #9034 C. Unable to access fileoptions data.', 'it-l10n-backupbuddy' ) . ' Error on file `' . backupbuddy_core::getLogDirectory() . 'fileoptions/' . $serial . '.txt' . '`: ' . $result );
+				pb_backupbuddy::status( 'haltScript', '' ); // Halt JS on page.
 				return false;
 			}
 		}
-		
+		if ( isset( $backup_options->options['profile'] ) ) {
+			$options = $backup_options->options['profile'];
+			$options = array_merge( pb_backupbuddy::settings( 'profile_defaults' ), $options );
+		}
+
+
+		// Return if cached.
 		if ( isset( $backup_options->options['integrity'] ) && ( count( $backup_options->options['integrity'] ) > 0 ) && ( pb_backupbuddy::_GET( 'reset_integrity' ) != $serial ) ) { // Already have integrity data and NOT resetting this one.
 			pb_backupbuddy::status( 'details', 'Integrity data for backup `' . $serial . '` is cached; not scanning again.' );
-			return true;
+			return $backup_options->options['integrity'];
 		} elseif ( pb_backupbuddy::_GET( 'reset_integrity' ) == $serial ) { // Resetting this one.
 			pb_backupbuddy::status( 'details', 'Resetting backup integrity stats for backup with serial `' . $serial . '`.' );
 		}  else { // No integrity data; not resetting. Just keep going...
 		}
-		
-		if ( pb_backupbuddy::$options['integrity_check'] == '0' ) { // Integrity checking disabled.
+
+
+		// Integrity check disabled. Skip.
+		if ( ( ( pb_backupbuddy::$options['profiles'][0]['integrity_check'] == '0' ) ) && ( pb_backupbuddy::_GET( 'reset_integrity' ) == '' ) && ( isset( $options['integrity_check'] ) ) && ( $options['integrity_check'] == '0' ) ) { // Integrity checking disabled. Allows run if manually rescanning on backups page.
 			pb_backupbuddy::status( 'details', 'Integrity check disabled. Skipping scan.' );
 			$file_stats = @stat( $file );
 			if ( $file_stats === false ) { // stat failure.
@@ -90,10 +140,10 @@ class pb_backupbuddy_core {
 				$file_modified = $file_stats['mtime'];
 			}
 			unset( $file_stats );
-			
+
 			$integrity = array(
 				'status'				=>		'Unknown',
-				'status_details'		=>		__( 'Integrity checking disabled based on settings. This file has not been verified.', 'it-l10n-backupbuddy' ),
+				'tests'					=>		array(),
 				'scan_time'				=>		0,
 				'detected_type'			=>		'unknown',
 				'size'					=>		$file_size,
@@ -103,131 +153,178 @@ class pb_backupbuddy_core {
 			);
 			$backup_options->options['integrity'] = array_merge( pb_backupbuddy::settings( 'backups_integrity_defaults' ), $integrity );
 			$backup_options->save();
-			
-			return true;
+
+			return $backup_options->options['integrity'];
 		}
-		
-		
+
+
 		//***** BEGIN CALCULATING STATUS DETAILS.
-		
-		
-		// Status defaults.
-		$status_details = array(
-			'found_dat'			=>	false,
-			'found_sql'			=>	false,
-			'found_wpconfig'	=>	false,
-			'scan_log'			=>	'',
-		);
+
+
 		$backup_type = '';
-		
-		
+
+
 		if ( !isset( pb_backupbuddy::$classes['zipbuddy'] ) ) {
 			require_once( pb_backupbuddy::plugin_path() . '/lib/zipbuddy/zipbuddy.php' );
-			pb_backupbuddy::$classes['zipbuddy'] = new pluginbuddy_zipbuddy( pb_backupbuddy::$options['backup_directory'] );
+			pb_backupbuddy::$classes['zipbuddy'] = new pluginbuddy_zipbuddy( backupbuddy_core::getBackupDirectory() );
 		}
-		pb_backupbuddy::status( 'details', 'Redirecting status logging temporarily.' );
+
 		$previous_status_serial = pb_backupbuddy::get_status_serial(); // Store current status serial setting to reset back later.
-		pb_backupbuddy::set_status_serial( 'zipbuddy_test' ); // Redirect logging output to a certain log file.
-		
-		
+		if ( true !== $skipLogRedirect ) {
+			pb_backupbuddy::status( 'details', 'Redirecting status logging temporarily.' );
+			pb_backupbuddy::set_status_serial( 'zipbuddy_test' ); // Redirect logging output to a certain log file.
+		}
+
 		// Look for comment.
 		pb_backupbuddy::status( 'details', 'Verifying comment in zip archive.' );
 		$raw_comment = pb_backupbuddy::$classes['zipbuddy']->get_comment( $file );
-		$comment = pb_backupbuddy::$classes['core']->normalize_comment_data( $raw_comment );
+		$comment = backupbuddy_core::normalize_comment_data( $raw_comment );
 		$comment = $comment['note'];
-		
+
+
+		$tests = array();
+		pb_backupbuddy::status( 'details', 'NOTE: It is normal to see several "File not found" messages in the next several log lines.' );
+
+
 		// Check for DAT file.
+		$pass = false;
 		pb_backupbuddy::status( 'details', 'Verifying DAT file in zip archive.' );
 		if ( pb_backupbuddy::$classes['zipbuddy']->file_exists( $file, 'wp-content/uploads/backupbuddy_temp/' . $serial . '/backupbuddy_dat.php' ) === true ) { // Post 2.0 full backup
-			$status_details['found_dat'] = true;
 			$backup_type = 'full';
+			$pass = true;
 		}
 		if ( pb_backupbuddy::$classes['zipbuddy']->file_exists( $file, 'wp-content/uploads/temp_' . $serial . '/backupbuddy_dat.php' ) === true ) { // Pre 2.0 full backup
-			$status_details['found_dat'] = true;
 			$backup_type = 'full';
+			$pass = true;
 		}
 		if ( pb_backupbuddy::$classes['zipbuddy']->file_exists( $file, 'backupbuddy_dat.php' ) === true ) { // DB backup
-			$status_details['found_dat'] = true;
 			$backup_type = 'db';
+			$pass = true;
 		}
-		
-		
-		// Check for DB SQL file.
-		pb_backupbuddy::status( 'details', 'Verifying database SQL file in zip archive.' );
-		if ( $options['skip_database_dump'] == '1' ) {
-			pb_backupbuddy::status( 'warning', 'WARNING: Database .SQL file does NOT exist because the database dump has been set to be SKIPPED based on settings. Use with cuation!' );
-		} else {
+		$tests[] = array(
+			'test'		=>	'BackupBuddy data file',
+			'pass'		=>	$pass,
+		);
+
+
+
+		if ( isset( $options['type'] ) && ( 'files' == $options['type'] ) ) {
+			pb_backupbuddy::status( 'details', 'Files only backup type so skipping scan of database files in backup as it is not applicable.' );
+		} else { // Non-files only backup so check for DB.
+			// Check for DB .sql file.
+			$pass = false;
+			$db_test_note = '';
+			pb_backupbuddy::status( 'details', 'Verifying database SQL file in zip archive.' );
 			if ( pb_backupbuddy::$classes['zipbuddy']->file_exists( $file, 'wp-content/uploads/backupbuddy_temp/' . $serial . '/db_1.sql' ) === true ) { // post 2.0 full backup
-				$status_details['found_sql'] = true;
 				$backup_type = 'full';
+				$pass = true;
 			}
 			if ( pb_backupbuddy::$classes['zipbuddy']->file_exists( $file, 'wp-content/uploads/temp_' . $serial . '/db.sql' ) === true ) { // pre 2.0 full backup
-				$status_details['found_sql'] = true;
 				$backup_type = 'full';
+				$pass = true;
 			}
 			if ( pb_backupbuddy::$classes['zipbuddy']->file_exists( $file, 'db_1.sql' ) === true ) { // db only backup 2.0+
-				$status_details['found_sql'] = true;
 				$backup_type = 'db';
+				$pass = true;
 			}
 			if ( pb_backupbuddy::$classes['zipbuddy']->file_exists( $file, 'db.sql' ) === true ) { // db only backup pre-2.0
-				$status_details['found_sql'] = true;
 				$backup_type = 'db';
+				$pass = true;
 			}
+
+			if ( '1' == $options['skip_database_dump'] ) {
+				if ( false === $pass ) {
+					pb_backupbuddy::status( 'warning', 'WARNING: Database .SQL does NOT exist because database dump was set to be skipped based on settings. Use with caution. The database was NOT backed up.' );
+				} else { // DB dump set to be skipped but was found. Just in case...
+					pb_backupbuddy::status( 'warning', 'Warning #58458749. Database dump was set to be skip _BUT_ database file WAS found?' );
+				}
+				$pass = true;
+				$db_test_note = ' <span class="pb_label pb_label-warning">' . __( 'Database skipped', 'it-l10n-backupbuddy' ) . '</span>';
+				$scan_notes[] = '<span class="pb_label pb_label-warning">' . __( 'Database skipped', 'it-l10n-backupbuddy' ) . '</span>';
+			}
+			$tests[] = array(
+				'test'		=>	'Database SQL file' . $db_test_note,
+				'pass'		=>	$pass,
+			);
 		}
-		
-		
-		// Check for WordPress config file.
-		pb_backupbuddy::status( 'details', 'Verifying WordPress wp-config.php configuration file in zip archive.' );
-		if ( pb_backupbuddy::$classes['zipbuddy']->file_exists( $file, 'wp-config.php' ) === true ) {
-			$status_details['found_wpconfig'] = true;
-			$backup_type = 'full';
+
+
+
+		// Use filename to determine backup type if detectable as it is more authoritive than the above guesses.
+		if ( false !== stristr( $file, '-db-' ) ) {
+			$backup_type ='db';
+		} elseif ( false !== stristr( $file, '-full-' ) ) {
+			$backup_type ='full';
+		} elseif ( false !== stristr( $file, '-files-' ) ) {
+			$backup_type ='files';
+		} else {
+			// Filename determination was not conclusive. Leave as-is based on deduced backup type determined earlier.
 		}
-		if ( pb_backupbuddy::$classes['zipbuddy']->file_exists( $file, 'wp-content/uploads/backupbuddy_temp/' . $serial . '/wp-config.php' ) === true ) {
-			$status_details['found_wpconfig'] = true;
-			$backup_type = 'full';
-		}
-		
-		
+
+
+
+		// Check for wp-config.php file if full backup.
+		if ( 'full' == $backup_type ) {
+			$pass = false;
+			pb_backupbuddy::status( 'details', 'Verifying WordPress wp-config.php configuration file in zip archive.' );
+			if ( pb_backupbuddy::$classes['zipbuddy']->file_exists( $file, 'wp-config.php' ) === true ) {
+				$pass = true;
+			}
+			if ( pb_backupbuddy::$classes['zipbuddy']->file_exists( $file, 'wp-content/uploads/backupbuddy_temp/' . $serial . '/wp-config.php' ) === true ) {
+				$pass = true;
+			}
+			if ( false === $pass ) {
+				if ( isset( $options['excludes'] ) ) {
+					if ( false !== stristr( $options['excludes'], 'wp-config.' ) ) {
+						pb_backupbuddy::status( 'warning', 'Warning: An exclusion containing wp-config.php was found. Exclusions: `' . str_replace(array("\r", "\r\n", "\n"), '; ', $options['excludes'] ) . '`.' );
+					}
+				}
+			}
+			$tests[] = array(
+				'test'		=>	'WordPress wp-config.php file (full backups only)',
+				'pass'		=>	$pass,
+			);
+		} // end if full backup.
+
+
 		// Get zip scan log details.
 		pb_backupbuddy::status( 'details', 'Retrieving zip scan log.' );
 		$temp_details = pb_backupbuddy::get_status( 'zipbuddy_test' ); // Get zipbuddy scan log.
+		$scan_log = array();
 		foreach( $temp_details as $temp_detail ) {
-			$status_details['scan_log'][] = $temp_detail[4];
+			$scan_log[] = json_decode( $temp_detail )->{ 'data' };
 		}
-		pb_backupbuddy::set_status_serial( $previous_status_serial ); // Stop redirecting log to a specific file & set back to what it was prior.
-		pb_backupbuddy::status( 'details', 'Stopped temporary redirection of status logging.' );
-		
-		// Calculate status descriptions.
-		$integrity_description = '';
-		
+		if ( true !== $skipLogRedirect ) {
+			pb_backupbuddy::set_status_serial( $previous_status_serial ); // Stop redirecting log to a specific file & set back to what it was prior.
+			pb_backupbuddy::status( 'details', 'Stopped temporary redirection of status logging.' );
+		}
+
 		pb_backupbuddy::status( 'details', 'Calculating integrity scan status,' );
-		$integrity_status = 'pass'; // Default.
-		if ( $status_details['found_dat'] !== true ) {
-			$integrity_status = 'fail';
-			$integrity_description .= __('Error #7843564: Missing DAT file.', 'it-l10n-backupbuddy' );
-		}
-		if ( $options['skip_database_dump'] == '1' ) {
-			$integrity_description .= __('Warning: No SQL file (skip database dump setting enaled).', 'it-l10n-backupbuddy' );
-		} else {
-			if ( $status_details['found_sql'] !== true ) {
-				$integrity_status = 'fail';
-				$integrity_description .= __('Error #4664236: Missing database SQL file.', 'it-l10n-backupbuddy' );
+
+		// Check for any failed tests.
+		$is_ok = true;
+		$integrity_description = '';
+		foreach( $tests as $test ) {
+			if ( $test['pass'] !== true ) {
+				$is_ok = false;
+				$error = 'Error #389434. Integrity test FAILED. Test: `' . $test['test']. '`. ';
+				pb_backupbuddy::status( 'error', $error );
+				$integrity_description .= $error;
 			}
 		}
-		if ( ( $backup_type == 'full' ) && ( $status_details['found_wpconfig'] !== true ) ) {
-			$integrity_status = 'fail';
-			$integrity_description .= __('Error #47834674: Missing wp-config.php file.', 'it-l10n-backupbuddy' );
-		}
-		if ( $integrity_status == 'pass' ) { // All tests passed.
-			$integrity_description = __( 'All tests passed.', 'it-l10n-backupbuddy' );
+
+
+		if ( true === $is_ok ) {
+			$integrity_status = 'Pass';
+		} else {
+			$integrity_status = 'Fail';
 		}
 		pb_backupbuddy::status( 'details', 'Status: `' . $integrity_status . '`. Description: `' . $integrity_description . '`.' );
-		//$integrity_description .= '<br><br>' . __('Technical Details', 'it-l10n-backupbuddy' ) . ':<br />' . $integrity_zipresult_details;		
-		
-		
+
+
 		//***** END CALCULATING STATUS DETAILS.
-		
-		
+
+
 		// Get file information from file system.
 		pb_backupbuddy::status( 'details', 'Getting file details such as size, timestamp, etc.' );
 		$file_stats = @stat( $file );
@@ -237,40 +334,36 @@ class pb_backupbuddy_core {
 			$file_modified = 0;
 		} else { // stat success.
 			$file_size = $file_stats['size'];
-			$file_modified = $file_stats['ctime']; // Created time.
+			$file_modified = $file_stats['mtime']; // Created time.
 		}
 		unset( $file_stats );
-		
-		
+
+
 		// Compile array of results for saving into data structure.
 		$integrity = array(
-			'status'				=>		$integrity_status,
-			'status_details'		=>		$status_details, // $integrity_description,
+			'is_ok'					=>		$is_ok,						// bool
+			'tests'					=>		$tests,						// Array of tests.
 			'scan_time'				=>		time(),
+			'scan_log'				=>		$scan_log,
+			'scan_notes'			=>		$scan_notes,				// Misc text to display next to status.
 			'detected_type'			=>		$backup_type,
 			'size'					=>		$file_size,
 			'modified'				=>		$file_modified,				// Actually created time now.
 			'file'					=>		basename( $file ),
 			'comment'				=>		$comment,					// boolean false if no comment. string if comment.
 		);
-		
+
 		pb_backupbuddy::status( 'details', 'Saving backup file integrity check details.' );
 		$backup_options->options['integrity'] = array_merge( pb_backupbuddy::settings( 'backups_integrity_defaults' ), $integrity );
 		$backup_options->save();
-		//pb_backupbuddy::$classes['zipbuddy']->clear_status();
-		
-		
-		if ( $integrity_status == 'pass' ) { // 100% success
-			return true;
-		} else {
-			return false;
-		}
-		
-		
+
+
+		return $backup_options->options['integrity'];
+
 	} // End backup_integrity_check().
-	
-	
-	
+
+
+
 	/*	get_serial_from_file()
 	 *	
 	 *	Returns the backup serial based on the filename.
@@ -278,17 +371,17 @@ class pb_backupbuddy_core {
 	 *	@param		string		$file		Filename containing a serial to extract.
 	 *	@return		string					Serial found.
 	 */
-	public function get_serial_from_file( $file ) {
-		
+	public static function get_serial_from_file( $file ) {
+
 		$serial = strrpos( $file, '-' ) + 1;
 		$serial = substr( $file, $serial, ( strlen( $file ) - $serial - 4 ) );
-		
+
 		return $serial;
-		
+
 	} // End get_serial_from_file().
-	
-	
-	
+
+
+
 	/**
 	 * versions_confirm()
 	 *
@@ -298,15 +391,15 @@ class pb_backupbuddy_core {
 	 * @param		boolean		$notify		Optional. Whether or not to alert to the screen (and throw error to log) of a version issue.\
 	 * @return		boolean					True if the selected type is a bad version
 	 */
-	function versions_confirm( $type = '', $notify = false ) {
-		
+	public static function versions_confirm( $type = '', $notify = false ) {
+
 		$bad_version = false;
-		
+
 		if ( ( $type == 'wordpress' ) || ( $type == '' ) ) {
 			global $wp_version;
 			if ( version_compare( $wp_version, pb_backupbuddy::settings( 'wp_minimum' ), '<=' ) ) {
 				if ( $notify === true ) {
-					pb_backupbuddy::alert( sprintf( __('ERROR: BackupBuddy requires WordPress version %1$s or higher. You may experience unexpected behavior or complete failure in this environment. Please consider upgrading WordPress.', 'it-l10n-backupbuddy' ), $this->_wp_minimum) );
+					pb_backupbuddy::alert( sprintf( __('ERROR: BackupBuddy requires WordPress version %1$s or higher. You may experience unexpected behavior or complete failure in this environment. Please consider upgrading WordPress.', 'it-l10n-backupbuddy' ), self::_wp_minimum) );
 					pb_backupbuddy::log( 'Unsupported WordPress Version: ' . $wp_version , 'error' );
 				}
 				$bad_version = true;
@@ -321,35 +414,122 @@ class pb_backupbuddy_core {
 				$bad_version = true;
 			}
 		}
-		
+
 		return $bad_version;
-		
+
 	} // End versions_confirm().
-	
-	
-	
+
+
+
+	/* getBackupDirectory()			backupbuddy_core::getBackupDirectory()
+	 *
+	 * Retrieve directory for storing backups within.
+	 *
+	 * @return	string		Full path to directory, including trailing slash.
+	 *
+	 */
+	public static function getBackupDirectory() {
+		if ( '' == pb_backupbuddy::$options['backup_directory'] ) {
+			$dir = self::_getBackupDirectoryDefault();
+		} else {
+			$dir = pb_backupbuddy::$options['backup_directory'];
+		}
+		return $dir;
+	}
+
+
+
+	/* getLogDirectory()			backupbuddy_core::getLogDirectory()
+	 *
+	 * Retrieve directory for storing logs within.
+	 *
+	 * @return	string		Full path to directory, including trailing slash.
+	 *
+	 */
+	// backupbuddy_core::getLogDirectory()
+	public static function getLogDirectory() {
+		if ( defined( 'PB_STANDALONE' ) && PB_STANDALONE === true ) {
+			return ABSPATH . 'importbuddy/';
+		}
+		$uploads_dirs = wp_upload_dir();
+		return $uploads_dirs['basedir'] . '/pb_backupbuddy/';
+	} // End getLogDirectory().
+
+
+
+	/* getTempDirectory()			backupbuddy_core::getTempDirectory()
+	 *
+	 * Retrieve temporary directory for storing temporary files within.
+	 *
+	 * @return	string		Full path to directory, including trailing slash.
+	 *
+	 */
+	// backupbuddy_core::getTempDirectory()
+	public static function getTempDirectory() {
+		return ABSPATH . 'wp-content/uploads/backupbuddy_temp/';
+	} // End getTempDirectory().
+
+
+
+	/* _getBackupDirectoryDefault()
+	 *
+	 * Default directory backups will be stored in. getBackupDirectory() uses this as the default if no path is specifically set.
+	 *
+	 * @return	string		Full path to directory, including trailing slash.
+	 *
+	 */
+	public static function _getBackupDirectoryDefault() {
+		$uploads_dirs = wp_upload_dir();
+		return $uploads_dirs['basedir'] . '/backupbuddy_backups/';
+	} // End _getBackupDirectoryDefault().
+
+
+
 	/*	get_directory_exclusions()
 	 *	
-	 *	Get sanitized directory exclusions. See important note below!
+	 *	Get sanitized directory exclusions. Exclusions are relative to site root (ABSPATH). See important note below!
 	 *	IMPORTANT NOTE: Cannot exclude the temp directory here as this is where SQL and DAT files are stored for inclusion in the backup archive.
 	 *	
+	 *	@param		array 	$profile		Profile array of data.
 	 *	@param		bool	$trim_suffix	True (default) if trailing slash should be trimmed from directories
+	 *	@param		string	$serial			Optional serial of current backup. By default all subdirectories within the backupbuddy_temp dir are explicitly excluded. Specifying allows this serial subdirectory to not be excluded.
 	 *	@return		array					Array of directories to exclude.
 	 */
-	public static function get_directory_exclusions( $trim_suffix = true ) {
-		
+	public static function get_directory_exclusions( $profile, $trim_suffix = true, $serial = '' ) {
+
+		$profile = array_merge( pb_backupbuddy::settings( 'profile_defaults' ), $profile );
+
 		// Get initial array.
-		$exclusions = trim( pb_backupbuddy::$options['excludes'] ); // Trim string.
+		$exclusions = trim( $profile['excludes'] ); // Trim string.
 		$exclusions = preg_split('/\n|\r|\r\n/', $exclusions ); // Break into array on any type of line ending.
-		
-		$abspath = str_replace( '\\', '/', ABSPATH );
-		// Add additional internal exclusions.
-		$exclusions[] = str_replace( rtrim( $abspath, '\\\/' ), '', pb_backupbuddy::$options['backup_directory'] ); // Exclude backup directory.
-		$exclusions[] = '/' . ltrim( str_replace( ABSPATH, '', pb_backupbuddy::$options['log_directory'] ), '\\/' ); // BackupBuddy logs & fileoptions data.
+
+
+		// Backup dir can be custom set and even migrated over to have weird slash mismatch issues. Sanitize it.
+		$backupDir = self::getBackupDirectory();
+		pb_backupbuddy::status( 'details', 'Absolute storage directory: `' . $backupDir . '.' );
+		$normedBackupDir = str_replace( '\\', '/', $backupDir );
+		$normedABSPATH = str_replace( '\\', '/', ABSPATH );
+		$backupDir = '/' . str_replace( $normedABSPATH, '', $normedBackupDir );
+		pb_backupbuddy::status( 'details', 'Relative storage directory: `' . $backupDir . '.' );
+		$exclusions[] = $backupDir;
+
+
+		$exclusions[] = '/' . ltrim( str_replace( ABSPATH, '', self::getLogDirectory() ), '\\/' ); // BackupBuddy logs & fileoptions data.
 		$exclusions[] = '/importbuddy/'; // Exclude importbuddy directory in root.
 		$exclusions[] = '/importbuddy.php'; // Exclude importbuddy.php script in root.
-		//$exclusions[] = str_replace( ABSPATH, '', pb_backupbuddy::$options['temp_directory'] ) . 'fileoptions/'; // Temporary backup options storage directory. Causes issues backing up if a lock file is set to backup and goes away so just bypass entirely. Not much need to store this anyways.
-		
+
+		// Exclude all temp directories within backupbuddy_temp, except any subdirectories containing the serial specified (if any).
+		$tempDirs = glob( self::getTempDirectory() . '*', GLOB_ONLYDIR );
+		if ( ! is_array( $tempDirs ) ) {
+			$tempDirs = array();
+		}
+		foreach( $tempDirs as $tempDir ) {
+			if ( ( '' == $serial ) || ( false === strstr( $tempDir, $serial ) ) ) { // If no specific serial supplied OR this dir does not contain the serial, exclude it.
+				pb_backupbuddy::status( 'details', 'Excluding additional temp directory subdir: `' . $tempDir . '`.' );
+				$exclusions[] = '/' . ltrim( str_replace( ABSPATH, '', $tempDir ), '\\/' );
+			}
+		}
+
 		// Clean up & sanitize array.
 		if ( $trim_suffix ) {
 			array_walk( $exclusions, create_function( '&$val', '$val = rtrim( trim( $val ), \'/\' );' ) ); // Apply trim to all items within.
@@ -357,52 +537,69 @@ class pb_backupbuddy_core {
 			array_walk( $exclusions, create_function( '&$val', '$val = trim( $val );' ) ); // Apply (whitespace-only) trim to all items within.		
 		}
 		$exclusions = array_filter( $exclusions, 'strlen' ); // Remove any empty / blank lines.
-		
-		// IMPORTANT NOTE: Cannot exclude the temp directory here as this is where SQL and DAT files are stored for inclusion in the backup archive.
+
+		$exclusions = apply_filters( 'backupbuddy_zip_exclusions', $exclusions );
+		pb_backupbuddy::status( 'details', 'Initial zip exclusions (after filter): `' . implode( '; ', $exclusions ) . '`.' );
+
 		return $exclusions;
-		
+
 	} // End get_directory_exclusions().
-	
-	
-	
+
+
+
 	/*	mail_error()
 	 *	
 	 *	Sends an error email to the defined email address(es) on settings page.
 	 *	
-	 *	@param		string		$message	Message to be included in the body of the email.
+	 *	@param		string			$message	Message to be included in the body of the email.
+	 *	@param		string			$override_recipient	Email address(es) to send to instead of the normal recipient.
+	 *	@param		string|array 	String or array of filename(s) to send as email attachments.
 	 *	@return		null
 	 */
-	function mail_error( $message ) {
-		
+	public static function mail_error( $message, $override_recipient = '', $attachments = array() ) {
+
 		if ( !isset( pb_backupbuddy::$options ) ) {
 			pb_backupbuddy::load();
 		}
-		
+
 		$subject = pb_backupbuddy::$options['email_notify_error_subject'];
 		$body = pb_backupbuddy::$options['email_notify_error_body'];
-		
+
 		$replacements = array(
 			'{site_url}' => site_url(),
 			'{backupbuddy_version}' => pb_backupbuddy::settings( 'version' ),
 			'{current_datetime}' => date(DATE_RFC822),
 			'{message}' => $message
 		);
-		
+
 		foreach( $replacements as $replace_key => $replacement ) {
 			$subject = str_replace( $replace_key, $replacement, $subject );
 			$body = str_replace( $replace_key, $replacement, $body );
 		}
-		
+
 		$email = pb_backupbuddy::$options['email_notify_error'];
-		pb_backupbuddy::status( 'error', 'Sending email error notification. Subject: `' . $subject . '`; body: `' . $body . '`; recipient(s): `' . $email . '`.' );
-		if ( !empty( $email ) ) {
-			wp_mail( $email, $subject, $body, 'From: '.$email."\r\n".'Reply-To: '.get_option('admin_email')."\r\n");
+		if ( $override_recipient != '' ) {
+			$email = $override_recipient;
+			pb_backupbuddy::status( 'details', 'Overriding email recipient to: `' . $override_recipient . '`.' );
 		}
-		
+		pb_backupbuddy::status( 'error', 'Sending email error notification with subject `' . $subject . '` to recipient(s): `' . $email . '`.' );
+		if ( !empty( $email ) ) {
+			if ( pb_backupbuddy::$options['email_return'] != '' ) {
+				$email_return = pb_backupbuddy::$options['email_return'];
+			} else {
+				$email_return = get_option('admin_email');
+			}
+
+			$result = wp_mail( $email, $subject, $body, 'From: BackupBuddy <' . $email_return . ">\r\n".'Reply-To: '.get_option('admin_email')."\r\n", $attachments );
+			if ( false === $result ) {
+				pb_backupbuddy::status( 'error', 'Error #45443554: Unable to send error email with WordPress wp_mail(). Verify WordPress & Server settings.' );
+			}
+		}
+
 	} // End mail_error().
-	
-	
-	
+
+
+
 	/*	mail_notify_scheduled()
 	 *	
 	 *	Sends a message email to the defined email address(es) on settings page.
@@ -411,18 +608,18 @@ class pb_backupbuddy_core {
 	 *	@param		string		$message			Message to be included in the body of the email.
 	 *	@return		null
 	 */
-	function mail_notify_scheduled( $serial, $start_or_complete, $message ) {
-		
+	public static function mail_notify_scheduled( $serial, $start_or_complete, $message ) {
+
 		if ( !isset( pb_backupbuddy::$options ) ) {
 			pb_backupbuddy::load();
 		}
-		
+
 		if ( $start_or_complete == 'start' ) {
 			$email = pb_backupbuddy::$options['email_notify_scheduled_start'];
-			
+
 			$subject = pb_backupbuddy::$options['email_notify_scheduled_start_subject'];
 			$body = pb_backupbuddy::$options['email_notify_scheduled_start_body'];
-			
+
 			$replacements = array(
 				'{site_url}' => site_url(),
 				'{backupbuddy_version}' => pb_backupbuddy::settings( 'version' ),
@@ -431,30 +628,30 @@ class pb_backupbuddy_core {
 			);
 		} elseif ( $start_or_complete == 'complete' ) {
 			$email = pb_backupbuddy::$options['email_notify_scheduled_complete'];
-			
+
 			$subject = pb_backupbuddy::$options['email_notify_scheduled_complete_subject'];
 			$body = pb_backupbuddy::$options['email_notify_scheduled_complete_body'];
-			
+
 			$archive_file = '';
 			require_once( pb_backupbuddy::plugin_path() . '/classes/fileoptions.php' );
-			$backup_options = new pb_backupbuddy_fileoptions( pb_backupbuddy::$options['log_directory'] . 'fileoptions/' . $serial . '.txt' );
+			$backup_options = new pb_backupbuddy_fileoptions( backupbuddy_core::getLogDirectory() . 'fileoptions/' . $serial . '.txt', $read_only = true, $ignore_lock = true );
 			if ( true !== ( $result = $backup_options->is_ok() ) ) {
-				pb_backupbuddy::status( 'error', 'Error retrieving fileoptions file `' . pb_backupbuddy::$options['log_directory'] . 'fileoptions/' . $serial . '.txt' . '`. Err 35564332.' );
+				pb_backupbuddy::status( 'error', 'Error retrieving fileoptions file `' . backupbuddy_core::getLogDirectory() . 'fileoptions/' . $serial . '.txt' . '`. Err 35564332.' );
 				$archive_file = '[file_unknown]';
 				$backup_size = '[size_unknown]';
 				$backup_type = '[type_unknown]';
 			} else {
 				$archive_file = $backup_options->options['archive_file'];
-				$backup_size = pb_backupbuddy::$format->file_size( $backup_options->options['archive_size'] );
+				$backup_size = $backup_options->options['archive_size'];
 				$backup_type = $backup_options->options['type'];
 			}
-			
+
 			$replacements = array(
 				'{site_url}' => site_url(),
 				'{backupbuddy_version}' => pb_backupbuddy::settings( 'version' ),
 				'{current_datetime}' => date(DATE_RFC822),
 				'{message}' => $message,
-				
+
 				'{backup_serial}' => $serial,
 				'{download_link}' => pb_backupbuddy::ajax_url( 'download_archive' ) . '&backupbuddy_backup=' . basename( $archive_file ),
 				'{backup_file}' => basename( $archive_file ),
@@ -464,30 +661,35 @@ class pb_backupbuddy_core {
 		} else {
 			pb_backupbuddy::status( 'error', 'ERROR #54857845785: Fatally halted. Invalid schedule type. Expected `start` or `complete`. Got `' . $start_or_complete . '`.' );
 		}
-		
-		
+
+
 		foreach( $replacements as $replace_key => $replacement ) {
 			$subject = str_replace( $replace_key, $replacement, $subject );
 			$body = str_replace( $replace_key, $replacement, $body );
 		}
-		
-		
+
+		if ( pb_backupbuddy::$options['email_return'] != '' ) {
+			$email_return = pb_backupbuddy::$options['email_return'];
+		} else {
+			$email_return = get_option('admin_email');
+		}
+
 		pb_backupbuddy::status( 'error', 'Sending email schedule notification. Subject: `' . $subject . '`; body: `' . $body . '`; recipient(s): `' . $email . '`.' );
 		if ( !empty( $email ) ) {
-			wp_mail( $email, $subject, $body, 'From: '.$email."\r\n".'Reply-To: '.get_option('admin_email')."\r\n");
+			wp_mail( $email, $subject, $body, 'From: BackupBuddy <' . $email_return . ">\r\n".'Reply-To: '.get_option('admin_email')."\r\n");
 		}
 	} // End mail_notify_scheduled().
-	
-	
-	
+
+
+
 	/*	backup_prefix()
 	 *	
 	 *	Strips all non-file-friendly characters from the site URL. Used in making backup zip filename.
 	 *	
 	 *	@return		string		The filename friendly converted site URL.
 	 */
-	function backup_prefix() {
-		
+	public static function backup_prefix() {
+
 		$siteurl = site_url();
 		$siteurl = str_replace( 'http://', '', $siteurl );
 		$siteurl = str_replace( 'https://', '', $siteurl );
@@ -497,11 +699,33 @@ class pb_backupbuddy_core {
 		$siteurl = str_replace( ':', '_', $siteurl ); // Alternative port from 80 is stored in the site url.
 		$siteurl = str_replace( '~', '_', $siteurl ); // Strip ~.
 		return $siteurl;
-		
+
 	} // End backup_prefix().
-	
-	
-	
+
+
+
+	/* get_remote_send_defaults()
+	 *
+	 * Get default array values for the remote_sends fileoptions files.
+	 * @return		array
+	 *
+	 */
+	public static function get_remote_send_defaults() {
+		return array(
+			'destination'		=>	0,
+			'file'				=>	'',
+			'file_size'			=>	0,
+			'trigger'			=>	'',						// What triggered this backup. Valid values: scheduled, manual.
+			'send_importbuddy'	=>	false,
+			'start_time'		=>	time(),
+			'finish_time'		=>	0,
+			'status'			=>	'timeout',  // success, failure, timeout (default assumption if this is not updated in this PHP load)
+			'write_speed'		=>	0,
+		);
+	} // End get_remote_send_defaults();
+
+
+
 	/*	send_remote_destination()
 	 *	
 	 *	function description
@@ -513,35 +737,63 @@ class pb_backupbuddy_core {
 	 *	@param		bool	$delete_after		Whether or not to delete after send success after THIS send.
 	 *	@return		bool						Send status. true success, false failed.
 	 */
-	function send_remote_destination( $destination_id, $file, $trigger = '', $send_importbuddy = false, $delete_after = false ) {
-		
+	public static function send_remote_destination( $destination_id, $file, $trigger = '', $send_importbuddy = false, $delete_after = false ) {
+
 		if ( defined( 'PB_DEMO_MODE' ) ) {
 			return false;
 		}
-		
+
+		if ( ! file_exists( $file ) ) {
+			pb_backupbuddy::status( 'error', 'Error #8583489734: Unable to send file `' . $file . '` to remote destination as it no longer exists. It may have been deleted or permissions are invalid.' );
+			return false;
+		}
+
+		$migrationkey_transient_time = 60*60*24;
+
 		if ( '' == $file ) {
 			$backup_file_size = 50000; // not sure why anything current would be sending importbuddy but NOT sending a backup but just in case...
 		} else {
 			$backup_file_size = filesize( $file );
 		}
-		
-		pb_backupbuddy::status( 'details', 'Sending file `' . $file . '` (size: `' . $backup_file_size . '`) to remote destination `' . $destination_id . '` triggered by `' . $trigger . '`.' );
-		
-		// Record some statistics.
+
+		// Generate remote send ID for reference and add it as a new logging serial for better recording details.
 		$identifier = pb_backupbuddy::random_string( 12 );
-		pb_backupbuddy::$options['remote_sends'][$identifier] = array(
-			'destination'		=>	$destination_id,
-			'file'				=>	$file,
-			'file_size'			=>	$backup_file_size,
-			'trigger'			=>	$trigger,						// What triggered this backup. Valid values: scheduled, manual.
-			'send_importbuddy'	=>	$send_importbuddy,
-			'start_time'		=>	time(),
-			'finish_time'		=>	0,
-			'status'			=>	'timeout',  // success, failure, timeout (default assumption if this is not updated in this PHP load)
+
+		// Set migration key for later determining last initiated migration.
+		if ( 'migration' == $trigger ) {
+			set_transient( 'pb_backupbuddy_migrationkey', $identifier, $migrationkey_transient_time );
+		}
+
+		pb_backupbuddy::status( 'details', 'Sending file `' . $file . '` (size: `' . $backup_file_size . '`) to remote destination `' . $destination_id . '` triggered by `' . $trigger . '`.' );
+
+		pb_backupbuddy::status( 'details', 'About to create initial fileoptions data.' );
+		require_once( pb_backupbuddy::plugin_path() . '/classes/fileoptions.php' );
+		$fileoptions_obj = new pb_backupbuddy_fileoptions( backupbuddy_core::getLogDirectory() . 'fileoptions/send-' . $identifier . '.txt', $read_only = false, $ignore_lock = true, $create_file = true );
+		if ( true !== ( $result = $fileoptions_obj->is_ok() ) ) {
+			pb_backupbuddy::status( 'error', __('Fatal Error #9034 A. Unable to access fileoptions data.', 'it-l10n-backupbuddy' ) . ' Error: ' . $result );
+			return false;
+		}
+		pb_backupbuddy::status( 'details', 'Fileoptions data loaded.' );
+		$fileoptions = &$fileoptions_obj->options; // Set reference.
+
+		// Record some statistics.
+		$fileoptions = array_merge(
+			self::get_remote_send_defaults(),
+			array(
+				'destination'		=>	$destination_id,
+				'file'				=>	$file,
+				'file_size'			=>	$backup_file_size,
+				'trigger'			=>	$trigger,						// What triggered this backup. Valid values: scheduled, manual.
+				'send_importbuddy'	=>	$send_importbuddy,
+				'start_time'		=>	time(),
+				'finish_time'		=>	0,
+				'status'			=>	'timeout',  // success, failure, timeout (default assumption if this is not updated in this PHP load)
+				'write_speed'		=>	0,
+			)
 		);
 		pb_backupbuddy::save();
-		
-		
+
+
 		// Prepare variables to pass to remote destination handler.
 		if ( '' == $file ) { // No file to send (blank string file typically happens when just sending importbuddy).
 			$files = array();
@@ -549,15 +801,15 @@ class pb_backupbuddy_core {
 			$files = array( $file );
 		}
 		$destination_settings = &pb_backupbuddy::$options['remote_destinations'][$destination_id];
-		
-		
+
+
 		// For Stash we will check the quota prior to initiating send.
 		if ( pb_backupbuddy::$options['remote_destinations'][$destination_id]['type'] == 'stash' ) {
 			// Pass off to destination handler.
 			require_once( pb_backupbuddy::plugin_path() . '/destinations/bootstrap.php' );
 			$send_result = pb_backupbuddy_destinations::get_info( 'stash' ); // Used to kick the Stash destination into life.
 			$stash_quota = pb_backupbuddy_destination_stash::get_quota( pb_backupbuddy::$options['remote_destinations'][$destination_id], true );
-			
+
 			if ( $file != '' ) {
 				$backup_file_size = filesize( $file );
 			} else {
@@ -565,86 +817,104 @@ class pb_backupbuddy_core {
 			}
 			if ( ( $backup_file_size + $stash_quota['quota_used'] ) > $stash_quota['quota_total'] ) {
 				$message = '';
-				$message .= "You do not have enough Stash storage space to send this file. Please upgrade your Stash storage at http://ithemes.com/member/stash.php or delete files to make space.\n\n";
-				
+				$message .= "You do not have enough Stash storage space to send this file. Please upgrade your Stash storage at http://ithemes.com/member/panel/stash.php or delete files to make space.\n\n";
+
 				$message .= 'Attempting to send file of size ' . pb_backupbuddy::$format->file_size( $backup_file_size ) . ' but you only have ' . $stash_quota['quota_available_nice'] . ' available. ';
 				$message .= 'Currently using ' . $stash_quota['quota_used_nice'] . ' of ' . $stash_quota['quota_total_nice'] . ' (' . $stash_quota['quota_used_percent'] . '%).';
-				
+
 				pb_backupbuddy::status( 'error', $message );
-				pb_backupbuddy::$classes['core']->mail_error( $message );
-				
-				pb_backupbuddy::$options['remote_sends'][$identifier]['status'] = 'Failure. Insufficient destination space.';
-				pb_backupbuddy::save();
-				
+				backupbuddy_core::mail_error( $message );
+
+				$fileoptions['status'] = 'Failure. Insufficient destination space.';
+				$fileoptions_obj->save();
+
 				return false;
 			} else {
 				if ( isset( $stash_quota['quota_warning'] ) && ( $stash_quota['quota_warning'] != '' ) ) {
-					
+
 					// We log warning of usage but dont send error email.
 					$message = '';
-					$message .= 'WARNING: ' . $stash_quota['quota_warning'] . "\n\nPlease upgrade your Stash storage at http://ithemes.com/member/stash.php or delete files to make space.\n\n";
+					$message .= 'WARNING: ' . $stash_quota['quota_warning'] . "\n\nPlease upgrade your Stash storage at http://ithemes.com/member/panel/stash.php or delete files to make space.\n\n";
 					$message .= 'Currently using ' . $stash_quota['quota_used_nice'] . ' of ' . $stash_quota['quota_total_nice'] . ' (' . $stash_quota['quota_used_percent'] . '%).';
-					
+
 					pb_backupbuddy::status( 'details', $message );
-					//pb_backupbuddy::$classes['core']->mail_error( $message );
-					
+					//backupbuddy_core::mail_error( $message );
+
 				}
 			}
-			
+
 		}
-		
-		
+
+
 		if ( $send_importbuddy === true ) {
 			pb_backupbuddy::status( 'details', 'Generating temporary importbuddy.php file for remote send.' );
-			$importbuddy_temp = pb_backupbuddy::$options['temp_directory'] . 'importbuddy.php'; // Full path & filename to temporary importbuddy
-			$this->importbuddy( $importbuddy_temp ); // Create temporary importbuddy.
+			$importbuddy_temp = backupbuddy_core::getTempDirectory() . 'importbuddy.php'; // Full path & filename to temporary importbuddy
+			self::importbuddy( $importbuddy_temp ); // Create temporary importbuddy.
 			pb_backupbuddy::status( 'details', 'Generated temporary importbuddy.' );
 			$files[] = $importbuddy_temp; // Add importbuddy file to the list of files to send.
 			$send_importbuddy = true; // Track to delete after finished.
 		} else {
 			pb_backupbuddy::status( 'details', 'Not sending importbuddy.' );
 		}
-		
-		
+
+
+		// Clear fileoptions so other stuff can access it if needed.
+		$fileoptions_obj->save();
+		$fileoptions_obj->unlock();
+		unset( $fileoptions_obj );
+
+
 		// Pass off to destination handler.
 		require_once( pb_backupbuddy::plugin_path() . '/destinations/bootstrap.php' );
-		$send_result = pb_backupbuddy_destinations::send( $destination_settings, $files );
-		
-		
-		$this->kick_db(); // Kick the database to make sure it didn't go away, preventing options saving.
-		
-		
+		$send_result = pb_backupbuddy_destinations::send( $destination_settings, $files, $identifier );
+
+
+		self::kick_db(); // Kick the database to make sure it didn't go away, preventing options saving.
+
+		// Reload fileoptions.
+		pb_backupbuddy::status( 'details', 'About to load fileoptions data for saving send status.' );
+		require_once( pb_backupbuddy::plugin_path() . '/classes/fileoptions.php' );
+		$fileoptions_obj = new pb_backupbuddy_fileoptions( backupbuddy_core::getLogDirectory() . 'fileoptions/send-' . $identifier . '.txt', $read_only = false, $ignore_lock = false, $create_file = false );
+		if ( true !== ( $result = $fileoptions_obj->is_ok() ) ) {
+			pb_backupbuddy::status( 'error', __('Fatal Error #9034 G. Unable to access fileoptions data.', 'it-l10n-backupbuddy' ) . ' Error: ' . $result );
+			return false;
+		}
+		pb_backupbuddy::status( 'details', 'Fileoptions data loaded.' );
+		$fileoptions = &$fileoptions_obj->options; // Set reference.
+
+
 		// Update stats.
-		pb_backupbuddy::$options['remote_sends'][$identifier]['finish_time'] = time();
+		$fileoptions[$identifier]['finish_time'] = time();
 		if ( $send_result === true ) { // succeeded.
-			pb_backupbuddy::$options['remote_sends'][$identifier]['status'] = 'success';
+			$fileoptions['status'] = 'success';
+			$fileoptions['finish_time'] = time();
 			pb_backupbuddy::status( 'details', 'Remote send SUCCESS.' );
 		} elseif ( $send_result === false ) { // failed.
-			pb_backupbuddy::$options['remote_sends'][$identifier]['status'] = 'failure';
+			$fileoptions['status'] = 'failure';
 			pb_backupbuddy::status( 'details', 'Remote send FAILURE.' );
 		} elseif ( is_array( $send_result ) ) { // Array so multipart.
-			pb_backupbuddy::$options['remote_sends'][$identifier]['status'] = 'multipart';
-			pb_backupbuddy::$options['remote_sends'][$identifier]['finish_time'] = 0;
-			pb_backupbuddy::$options['remote_sends'][$identifier]['_multipart_id'] = $send_result[0];
-			pb_backupbuddy::$options['remote_sends'][$identifier]['_multipart_status'] = $send_result[1];
+			$fileoptions['status'] = 'multipart';
+			$fileoptions['finish_time'] = 0;
+			$fileoptions['_multipart_id'] = $send_result[0];
+			$fileoptions['_multipart_status'] = $send_result[1];
 			pb_backupbuddy::status( 'details', 'Multipart send in progress.' );
 		} else {
 			pb_backupbuddy::status( 'error', 'Error #5485785576463. Invalid status send result: `' . $send_result . '`.' );
 		}
-		pb_backupbuddy::save();
-		
-		
+		$fileoptions_obj->save();
+
+
 		// If we sent importbuddy then delete the local copy to clean up.
 		if ( $send_importbuddy !== false ) {
 			@unlink( $importbuddy_temp ); // Delete temporary importbuddy.
 		}
-		
-		
+
+
 		// Handle post-send deletion on success.
-		pb_backupbuddy::status( 'details', 'Checking if local file should be deleted.' );
+		pb_backupbuddy::status( 'details', 'Checking if local file should be deleted after remote send based on settings.' );
 		if ( true === $send_result ) { // Success; only continue on bool true. false indicates failure, array chunking.
 			if ( true == $delete_after ) { // Delete enabled so delete file.
-				
+
 				pb_backupbuddy::status( 'details', 'Local file should be deleted based on settings & success. Deleting local copy of file sent to destination.' );
 				if ( file_exists( $file ) ) {
 					$unlink_result = @unlink( $file );
@@ -654,24 +924,25 @@ class pb_backupbuddy_core {
 				}
 				if ( file_exists( $file ) ) { // File still exists.
 					pb_backupbuddy::status( 'details', __('Error. Unable to delete local file `' . $file .'` after send as set in settings.', 'it-l10n-backupbuddy' ) );
-					$this->mail_error( 'BackupBuddy was unable to delete local file `' . $file . '` after successful remove transfer though post-remote send deletion is enabled. You may want to delete it manually. This can be caused by permission problems or improper server configuration.' );
+					self::mail_error( 'BackupBuddy was unable to delete local file `' . $file . '` after successful remove transfer though post-remote send deletion is enabled. You may want to delete it manually. This can be caused by permission problems or improper server configuration.' );
 				} else { // Deleted.
-					pb_backupbuddy::status( 'details', __('Deleted local archive as set in settings.', 'it-l10n-backupbuddy' ) );
+					pb_backupbuddy::status( 'details', __('Deleted local archive after successful remote destination send based on settings.', 'it-l10n-backupbuddy' ) );
+					pb_backupbuddy::status( 'archiveDeleted', '' );
 				}
-				
+
 			} else { // Delete after disabled.
 				pb_backupbuddy::status( 'details', 'Post-send local file deletion disabled so skipping.' );
 			}
 		} else { // Send failed or not complete (chunking).
 			pb_backupbuddy::status( 'details', 'Remote send not completed so skipping post-send deletion check.' );
 		}
-		
+
 		return $send_result;
-		
+
 	} // End send_remote_destination().
-	
-	
-	
+
+
+
 	/*	destination_send()
 	 *	
 	 *	Send file(s) to a destination. Pass full array of destination settings.
@@ -680,18 +951,18 @@ class pb_backupbuddy_core {
 	 *	@param		array		$files						Array of files to send (full path).
 	 *	@return		bool|array								Bool true = success, bool false = fail, array = multipart transfer.
 	 */
-	public function destination_send( $destination_settings, $files ) {
-		
+	public static function destination_send( $destination_settings, $files, $send_id = '' ) {
+
 		// Pass off to destination handler.
 		require_once( pb_backupbuddy::plugin_path() . '/destinations/bootstrap.php' );
-		$send_result = pb_backupbuddy_destinations::send( $destination_settings, $files );
-		
+		$send_result = pb_backupbuddy_destinations::send( $destination_settings, $files, $send_id );
+
 		return $send_result;
-		
+
 	} // End destination_send().
-	
-	
-	
+
+
+
 	/*	backups_list()
 	 *	
 	 *	function description
@@ -700,44 +971,27 @@ class pb_backupbuddy_core {
 	 *	@param		boolean		$subsite_mode	When in subsite mode only backups for that specific subsite will be listed.
 	 *	@return		
 	 */
-	public function backups_list( $type = 'default', $subsite_mode = false ) {
-		
+	public static function backups_list( $type = 'default', $subsite_mode = false ) {
+
 		if ( ( pb_backupbuddy::_POST( 'bulk_action' ) == 'delete_backup' ) && ( is_array( pb_backupbuddy::_POST( 'items' ) ) ) ) {
 			$needs_save = false;
 			pb_backupbuddy::verify_nonce( pb_backupbuddy::_POST( '_wpnonce' ) ); // Security check to prevent unauthorized deletions by posting from a remote place.
 			$deleted_files = array();
 			foreach( pb_backupbuddy::_POST( 'items' ) as $item ) {
-				if ( file_exists( pb_backupbuddy::$options['backup_directory'] . $item ) ) {
-					if ( @unlink( pb_backupbuddy::$options['backup_directory'] . $item ) === true ) {
+				if ( file_exists( backupbuddy_core::getBackupDirectory() . $item ) ) {
+					if ( @unlink( backupbuddy_core::getBackupDirectory() . $item ) === true ) {
 						$deleted_files[] = $item;
-						
+
 						// Cleanup any related fileoptions files.
-						$serial = pb_backupbuddy::$classes['core']->get_serial_from_file( $item );
-						$fileoptions_file = pb_backupbuddy::$options['log_directory'] . 'fileoptions/' . $serial . '.txt';
-						$fileoptions_filetree_file = pb_backupbuddy::$options['log_directory'] . 'fileoptions/' . $serial . '-filetree.txt';
-						if ( file_exists( $fileoptions_file ) ) {
-							if ( false === @unlink( $fileoptions_file ) ) {
-								pb_backupbuddy::status( 'error', 'Unable to delete fileoptions file `' . $fileoptions_file . '`.' );
-							}
-						}
-						if ( file_exists( $fileoptions_file . '.lock' ) ) {
-							if ( false === @unlink( $fileoptions_file . '.lock' ) ) {
-								pb_backupbuddy::status( 'error', 'Unable to delete fileoptions file `' . $fileoptions_file . '.lock`.' );
-							}
-						}
-						if ( file_exists( $fileoptions_filetree_file ) ) {
-							if ( false === @unlink( $fileoptions_filetree_file ) ) {
-								pb_backupbuddy::status( 'error', 'Unable to delete fileoptions file `' . $fileoptions_filetree_file . '`.' );
-							}
-						}
-						
-						$backup_files = glob( pb_backupbuddy::$options['backup_directory'] . '*.zip' );
+						$serial = backupbuddy_core::get_serial_from_file( $item );
+
+						$backup_files = glob( backupbuddy_core::getBackupDirectory() . '*.zip' );
 						if ( ! is_array( $backup_files ) ) {
 							$backup_files = array();
 						}
 						if ( count( $backup_files ) > 5 ) { // Keep a minimum number of backups in array for stats.
-							$this_serial = $this->get_serial_from_file( $item );
-							$fileoptions_file = pb_backupbuddy::$options['log_directory'] . 'fileoptions/' . $this_serial . '.txt';
+							$this_serial = self::get_serial_from_file( $item );
+							$fileoptions_file = backupbuddy_core::getLogDirectory() . 'fileoptions/' . $this_serial . '.txt';
 							if ( file_exists( $fileoptions_file ) ) {
 								@unlink( $fileoptions_file );
 							}
@@ -754,156 +1008,95 @@ class pb_backupbuddy_core {
 			if ( $needs_save === true ) {
 				pb_backupbuddy::save();
 			}
-			
+
 			pb_backupbuddy::alert( __( 'Deleted:', 'it-l10n-backupbuddy' ) . ' ' . implode( ', ', $deleted_files ) );
 		} // End if deleting backup(s).
-		
-		
+
+
 		$backups = array();
 		$backup_sort_dates = array();
-		$files = glob( pb_backupbuddy::$options['backup_directory'] . 'backup*.zip' );
+		$files = glob( backupbuddy_core::getBackupDirectory() . 'backup*.zip' );
 		if ( is_array( $files ) && !empty( $files ) ) { // For robustness. Without open_basedir the glob() function returns an empty array for no match. With open_basedir in effect the glob() function returns a boolean false for no match.
-			
-			$backup_prefix = $this->backup_prefix(); // Backup prefix for this site. Used for MS checking that this user can see this backup.
+
+			$backup_prefix = self::backup_prefix(); // Backup prefix for this site. Used for MS checking that this user can see this backup.
 			foreach( $files as $file_id => $file ) {
-				
+
 				if ( ( $subsite_mode === true ) && is_multisite() ) { // If a Network and NOT the superadmin must make sure they can only see the specific subsite backups for security purposes.
-					
+
 					// Only allow viewing of their own backups.
 					if ( !strstr( $file, $backup_prefix ) ) {
 						unset( $files[$file_id] ); // Remove this backup from the list. This user does not have access to it.
 						continue; // Skip processing to next file.
 					}
 				}
-				
-				$serial = pb_backupbuddy::$classes['core']->get_serial_from_file( $file );
-				
-				
-				// Populate integrity data structure in options.
-				pb_backupbuddy::$classes['core']->backup_integrity_check( $file );
-				
-				
+
+				$serial = backupbuddy_core::get_serial_from_file( $file );
+				require_once( pb_backupbuddy::plugin_path() . '/classes/fileoptions.php' );
+				$backup_options = new pb_backupbuddy_fileoptions( backupbuddy_core::getLogDirectory() . 'fileoptions/' . $serial . '.txt', $read_only = false, $ignore_lock = false, $create_file = true ); // Will create file to hold integrity data if nothing exists.
+				$backup_integrity = backupbuddy_core::backup_integrity_check( $file, $backup_options );
+
 				// Backup status.
 				$pretty_status = array(
-					'pass'	=>	'<span class="pb_label pb_label-success">Good</span>', //'Good',
-					'fail'	=>	'<span class="pb_label pb_label-important">Bad</span>',
+					true	=>	'<span class="pb_label pb_label-success">Good</span>', // v4.0+ Good.
+					'pass'	=>	'<span class="pb_label pb_label-success">Good</span>', // Pre-v4.0 Good.
+					false	=>	'<span class="pb_label pb_label-important">Bad</span>',  // v4.0+ Bad.
+					'fail'	=>	'<span class="pb_label pb_label-important">Bad</span>',  // Pre-v4.0 Bad.
 				);
-				
+
 				// Backup type.
 				$pretty_type = array(
 					'full'	=>	'Full',
 					'db'	=>	'Database',
+					'files' =>	'Files',
 				);
-				
-				require_once( pb_backupbuddy::plugin_path() . '/classes/fileoptions.php' );
-				$backup_options = new pb_backupbuddy_fileoptions( pb_backupbuddy::$options['log_directory'] . 'fileoptions/' . $serial . '.txt' );
-				if ( true !== ( $result = $backup_options->is_ok() ) ) {
-					pb_backupbuddy::status( 'error', 'Error retrieving fileoptions file `' . pb_backupbuddy::$options['log_directory'] . 'fileoptions/' . $serial . '.txt' . '`. Err 4332345.' );
-				}
-				
-				// Verify valid fileoptions data exists.
-				if ( ! is_array( $backup_options->options ) ) { // fileoptions data missing. try to regenerate with integrity check
-					pb_backupbuddy::status( 'details', 'Fileoptions data missing loading backup list. Re-scanning integrity to regenerate on file `' . $file . '`.' );
-					pb_backupbuddy::$classes['core']->backup_integrity_check( $file );
-					
-					// Re-load fileoptions now.
-					$backup_options = new pb_backupbuddy_fileoptions( pb_backupbuddy::$options['log_directory'] . 'fileoptions/' . $serial . '.txt' );
-					if ( true !== ( $result = $backup_options->is_ok() ) ) {
-						pb_backupbuddy::status( 'error', 'Error retrieving fileoptions file `' . pb_backupbuddy::$options['log_directory'] . 'fileoptions/' . $serial . '.txt' . '`. Err 3278475845.' );
-					}
-				}
-				
-				$step_times = array();
-				if ( isset( $backup_options->options['steps'] ) ) {
-					foreach( $backup_options->options['steps'] as $step ) {
-						if ( isset( $step['finish_time'] ) && ( $step['finish_time'] != 0 ) ) {
-							
-							// Step time taken.
-							$step_times[] = $step['finish_time'] - $step['start_time'];
-							
-						}
-					} // End foreach.
-				} else { // End if serial in array is set.
-					$step_times[] = 'unknown';
-				} // End if serial in array is NOT set.
-				$step_times = implode( ', ', $step_times );
-				
+
+
 				// Defaults...
 				$detected_type = '';
 				$file_size = '';
 				$modified = '';
 				$modified_time = 0;
 				$integrity = '';
-				$statistics = '';
-				$write_speed = '';
-				
-				
+
+
 				if ( is_array( $backup_options->options ) ) { // Data intact... put it all together.
-					// Calculate zipping step time to use later for calculating write speed.
-					if ( isset( $backup_options->options['steps']['backup_zip_files'] ) ) {
-						$zip_time = $backup_options->options['steps']['backup_zip_files'];
-					} else {
-						$zip_time = 0;
-					}
-					
-					// Calculate write speed in MB/sec for this backup.
-					if ( $zip_time == '0' ) { // Took approx 0 seconds to backup so report this speed.
-						if ( !isset( $finish_time ) || ( $finish_time == '0' ) ) {
-							$write_speed = 'unknown';
-						} else {
-							$write_speed = '> ' . pb_backupbuddy::$format->file_size( $backup_options->options['integrity']['size'] );
-						}
-					} else {
-						if ( $zip_time == 0 ) {
-							$write_speed = '';
-						} else {
-							$write_speed = pb_backupbuddy::$format->file_size( $backup_options->options['integrity']['size'] / $zip_time );
-						}
-					}
-					
-					// Calculate start and finish.
-					if ( isset( $backup_options->options['start_time'] ) && isset( $backup_options->options['finish_time'] ) && ( $backup_options->options['start_time'] >0 ) && ( $backup_options->options['finish_time'] > 0 ) ) {
-						$start_time = $backup_options->options['start_time'];
-						$finish_time = $backup_options->options['finish_time'];
-						$total_time = $finish_time - $start_time;
-					} else {
-						$start_time = 0;
-						$finish_time = 0;
-						$total_time = 'unknown';
-					}
-					
-					
-					
-					// Figure out trigger.
-					if ( isset( $backup_options->options['trigger'] ) ) {
-						$trigger = $backup_options->options['trigger'];
-					} else {
-						$trigger = __( 'Unknown', 'it-l10n-backupbuddy' );
-					}
-					
-					// HTML output for stats.
-					$statistics = '';
-					if ( $total_time != 'unknown' ) {
-						$statistics .= "<span style='width: 80px; display: inline-block;'>Total time:</span>{$total_time} secs<br>";
-					}
-					if ( $step_times != 'unknown' ) {
-						$statistics .= "<span style='width: 80px; display: inline-block;'>Step times:</span>{$step_times}<br>";
-					}
-					if ( $write_speed != 'unknown' ) {
-						$statistics .= "<span style='width: 80px; display: inline-block;'>Write speed:</span>{$write_speed}/sec";
-					}
-					
 					// Calculate time ago.
 					$time_ago = '';
 					if ( isset( $backup_options->options['integrity'] ) && ( isset( $backup_options->options['integrity']['modified'] ) ) ) {
-						$time_ago = '<span class="description">' . pb_backupbuddy::$format->time_ago( $backup_options->options['integrity']['modified'] ) . ' ago</span>';
+						$time_ago = pb_backupbuddy::$format->time_ago( $backup_options->options['integrity']['modified'] ) . ' ago';
 					}
-					
+
+					$detected_type = pb_backupbuddy::$format->prettify( $backup_options->options['integrity']['detected_type'], $pretty_type );
+					if ( $detected_type == '' ) {
+						$detected_type = 'Unknown';
+					} else {
+						if ( isset( $backup_options->options['profile'] ) ) {
+							$detected_type = '
+							<div>
+								<span style="color: #AAA; float: left;">' . $detected_type . '</span>
+								<span style="display: inline-block; float: left; height: 15px; border-right: 1px solid #EBEBEB; margin-left: 6px; margin-right: 6px;"></span>
+								' . htmlentities( $backup_options->options['profile']['title'] ) . '
+							</div>
+							'
+							;
+						}
+					}
+
+					$file_size = pb_backupbuddy::$format->file_size( $backup_options->options['integrity']['size'] );
+					$modified = pb_backupbuddy::$format->date( pb_backupbuddy::$format->localize_time( $backup_options->options['integrity']['modified'] ), 'l, F j, Y - g:i:s a' );
+					$modified_time = $backup_options->options['integrity']['modified'];
+					if ( isset( $backup_options->options['integrity']['status'] ) ) { // Pre-v4.0.
+						$status = $backup_options->options['integrity']['status'];
+					} else { // v4.0+
+						$status = $backup_options->options['integrity']['is_ok'];
+					}
+
+
 					// Calculate main row string.
 					if ( $type == 'default' ) { // Default backup listing.
-						$main_string = '<a href="' . pb_backupbuddy::ajax_url( 'download_archive' ) . '&backupbuddy_backup=' . basename( $file ) . '">' . basename( $file ) . '</a>';
+						$main_string = '<a href="' . pb_backupbuddy::ajax_url( 'download_archive' ) . '&backupbuddy_backup=' . basename( $file ) . '" class="backupbuddyFileTitle" title="' . basename( $file ) . '">' . $modified . ' (' . $time_ago . ')</a>';
 					} elseif ( $type == 'migrate' ) { // Migration backup listing.
-						$main_string = '<a class="pb_backupbuddy_hoveraction_migrate" rel="' . basename( $file ) . '" href="' . pb_backupbuddy::page_url() . '&migrate=' . basename( $file ) . '&value=' . basename( $file ) . '">' . basename( $file ) . '</a>';
+						$main_string = '<a class="pb_backupbuddy_hoveraction_migrate backupbuddyFileTitle" rel="' . basename( $file ) . '" href="' . pb_backupbuddy::page_url() . '&migrate=' . basename( $file ) . '&value=' . basename( $file ) . '" title="' . basename( $file ) . '">' . $modified . ' (' . $time_ago . ')</a>';
 					} else {
 						$main_string = '{Unknown type.}';
 					}
@@ -911,41 +1104,35 @@ class pb_backupbuddy_core {
 					if ( isset( $backup_options->options['integrity']['comment'] ) && ( $backup_options->options['integrity']['comment'] !== false ) && ( $backup_options->options['integrity']['comment'] !== '' ) ) {
 						$main_string .= '<br><span class="description">Note: <span class="pb_backupbuddy_notetext">' . htmlentities( $backup_options->options['integrity']['comment'] ) . '</span></span>';
 					}
-					
-					if ( $backup_options->options['integrity']['status'] == 'pass' ) {
-						$status_details = __( 'All tests passed.', 'it-l10n-backupbuddy' );
-					} else {
-						$status_details = $backup_options->options['integrity']['status_details'];
+
+
+					$integrity = pb_backupbuddy::$format->prettify( $status, $pretty_status ) . ' ';
+					if ( isset( $backup_options->options['integrity']['scan_notes'] ) && count( (array)$backup_options->options['integrity']['scan_notes'] ) > 0 ) {
+						foreach( (array)$backup_options->options['integrity']['scan_notes'] as $scan_note ) {
+							$integrity .= $scan_note . ' ';
+						}
 					}
-					
-					$detected_type = pb_backupbuddy::$format->prettify( $backup_options->options['integrity']['detected_type'], $pretty_type );
-					$file_size = pb_backupbuddy::$format->file_size( $backup_options->options['integrity']['size'] );
-					$modified = pb_backupbuddy::$format->date( pb_backupbuddy::$format->localize_time( $backup_options->options['integrity']['modified'] ) ) . '<br>' . $time_ago;
-					$modified_time = $backup_options->options['integrity']['modified'];
-					$integrity = pb_backupbuddy::$format->prettify( $backup_options->options['integrity']['status'], $pretty_status ) .
-						' <a href="' . pb_backupbuddy::page_url() . '&reset_integrity=' . $serial  . '" title="Rescan integrity. Last checked ' . pb_backupbuddy::$format->date( $backup_options->options['integrity']['scan_time'] ) . '."><img src="' . pb_backupbuddy::plugin_url() . '/images/refresh_gray.gif" style="vertical-align: -1px;"></a>' .
-						'<div class="row-actions"><a title="' . __( 'Integrity Check Details', 'it-l10n-backupbuddy' ) . '" href="' . pb_backupbuddy::ajax_url( 'integrity_status' ) . '&serial=' . $serial . '&#038;TB_iframe=1&#038;width=640&#038;height=600" class="thickbox">' . __( 'View Details', 'it-l10n-backupbuddy' ) . '</a></div>';
-					
+					$integrity .= '<a href="' . pb_backupbuddy::page_url() . '&reset_integrity=' . $serial  . '" title="Rescan integrity. Last checked ' . pb_backupbuddy::$format->date( $backup_options->options['integrity']['scan_time'] ) . '."><img src="' . pb_backupbuddy::plugin_url() . '/images/refresh_gray.gif" style="vertical-align: -1px;"></a>';
+					$integrity .= '<div class="row-actions"><a title="' . __( 'Backup Status', 'it-l10n-backupbuddy' ) . '" href="' . pb_backupbuddy::ajax_url( 'integrity_status' ) . '&serial=' . $serial . '&#038;TB_iframe=1&#038;width=640&#038;height=600" class="thickbox">' . __( 'View Details', 'it-l10n-backupbuddy' ) . '</a></div>';
+
 				} // end if is_array( $backup_options ).
-				
-				
+
+
 				$backups[basename( $file )] = array(
-					array( basename( $file ), $main_string ),
+					array( basename( $file ), $main_string . '<br><span class="description">' . basename( $file ) . '</span>' ),
 					$detected_type,
 					$file_size,
-					$modified,
-					$statistics,
 					$integrity,
 				);
-				
-				
+
+
 				$backup_sort_dates[basename( $file)] = $modified_time;
-				
+
 			} // End foreach().
-			
+
 		} // End if.
-		
-		// Sort backup sizes.
+
+		// Sort backup by date.
 		arsort( $backup_sort_dates );
 		// Re-arrange backups based on sort dates.
 		$sorted_backups = array();
@@ -954,58 +1141,69 @@ class pb_backupbuddy_core {
 			unset( $backups[$backup_file] );
 		}
 		unset( $backups );
-		
-		
+
+
 		return $sorted_backups;
-		
+
 	} // End backups_list().
-	
-	
-	
+
+
+
 	// If output file not specified then outputs to browser as download.
 	// IMPORTANT: If outputting to browser (no output file) must die() after outputting content if using AJAX. Do not output to browser anything after this function in this case.
-	public static function importbuddy( $output_file = '', $importbuddy_pass_hash = '' ) {
-		if ( defined( 'PB_DEMO_MODE' ) ) {
-			echo 'Access denied in demo mode.';
-			return;
-		}
-		
+	public static function importbuddy( $output_file = '', $importbuddy_pass_hash = '', $return_not_echo = false ) {
+
 		pb_backupbuddy::set_greedy_script_limits(); // Some people run out of PHP memory.
-		
+
 		if ( $importbuddy_pass_hash == '' ) {
 			if ( !isset( pb_backupbuddy::$options ) ) {
 				pb_backupbuddy::load();
 			}
 			$importbuddy_pass_hash = pb_backupbuddy::$options['importbuddy_pass_hash'];
 		}
-		
+
 		if ( $importbuddy_pass_hash == '' ) {
-			$message = 'Error #9032: Warning only - You have not set a password to generate the ImportBuddy script yet on the BackupBuddy Settings page. If you are creating a backup, the importbuddy.php restore script will not be included in the backup. You can download it from the Restore page.  If you were trying to download ImportBuddy then you may have a plugin confict preventing the page from prompting you to enter a password.';
+			$message = 'Warning #9032 - You have not set an ImportBuddy password on the BackupBuddy Settings page. Once this password is set a copy of the importbuddy.php file needed to restore your backup will be included in Full backup zip files for convenience. It may manually be downloaded from the Restore / Migrate page.';
 			pb_backupbuddy::status( 'warning', $message );
 			return false;
 		}
-		
+
+		pb_backupbuddy::status( 'details', 'Loading importbuddy core file into memory.' );
 		$output = file_get_contents( pb_backupbuddy::plugin_path() . '/_importbuddy/_importbuddy.php' );
 		if ( $importbuddy_pass_hash != '' ) {
 			$output = preg_replace('/#PASSWORD#/', $importbuddy_pass_hash, $output, 1 ); // Only replaces first instance.
 		}
-		$output = preg_replace('/#VERSION#/', pb_backupbuddy::settings( 'version' ), $output, 1 ); // Only replaces first instance.
-		
+
+		$version_string = pb_backupbuddy::settings( 'version' ) . ' (downloaded ' . date( DATE_W3C ) . ')';
+
+		// If on DEV system (.git dir exists) then append some details on current.
+		if ( @file_exists( pb_backupbuddy::plugin_path() . '/.git/logs/HEAD' ) ) {
+			$commit_log = escapeshellarg( pb_backupbuddy::plugin_path() . '/.git/logs/HEAD' );
+			$commit_line = exec( "tail -n 1 {$commit_log}" );
+			$version_string .= ' <span style="font-size: 8px;">[DEV: ' . $commit_line . ']</span>';
+		}
+
+		$output = preg_replace('/#VERSION#/', $version_string, $output, 1 ); // Only replaces first instance.
+
 		// PACK IMPORTBUDDY
 		$_packdata = array( // NO TRAILING OR PRECEEDING SLASHES!
-			
+
 			'_importbuddy/importbuddy'							=>		'importbuddy',
 			'classes/_migrate_database.php'						=>		'importbuddy/classes/_migrate_database.php',
 			'classes/core.php'									=>		'importbuddy/classes/core.php',
 			'classes/import.php'								=>		'importbuddy/classes/import.php',
-			
-			
+
+			'js/jquery.leanModal.min.js'						=>		'importbuddy/js/jquery.leanModal.min.js',
+			'js/jquery.joyride-2.0.3.js'						=>		'importbuddy/js/jquery.joyride-2.0.3.js',
+			'js/modernizr.mq.js'								=>		'importbuddy/js/modernizr.mq.js',
+			'css/joyride.css'									=>		'importbuddy/css/joyride.css',
+
 			'images/working.gif'								=>		'importbuddy/images/working.gif',
 			'images/bullet_go.png'								=>		'importbuddy/images/bullet_go.png',
 			'images/favicon.png'								=>		'importbuddy/images/favicon.png',
 			'images/sort_down.png'								=>		'importbuddy/images/sort_down.png',
-			
-			
+			'images/icon_menu_32x32.png'						=>		'importbuddy/images/icon_menu_32x32.png',
+
 			'lib/dbreplace'										=>		'importbuddy/lib/dbreplace',
 			'lib/dbimport'										=>		'importbuddy/lib/dbimport',
 			'lib/commandbuddy'									=>		'importbuddy/lib/commandbuddy',
@@ -1013,18 +1211,20 @@ class pb_backupbuddy_core {
 			'lib/mysqlbuddy'									=>		'importbuddy/lib/mysqlbuddy',
 			'lib/textreplacebuddy'								=>		'importbuddy/lib/textreplacebuddy',
 			'lib/cpanel'										=>		'importbuddy/lib/cpanel',
-			
+
 			'pluginbuddy'										=>		'importbuddy/pluginbuddy',
-			
+
 			'controllers/pages/server_info'						=>		'importbuddy/controllers/pages/server_info',
-			'controllers/pages/server_info.php'					=>		'importbuddy/controllers/pages/server_info.php',
-			
+			'controllers/pages/server_tools.php'				=>		'importbuddy/controllers/pages/server_tools.php',
+
 			// Stash
 			'destinations/stash/lib/class.itx_helper.php'		=>		'importbuddy/classes/class.itx_helper.php',
 			'destinations/_s3lib/aws-sdk/lib/requestcore'		=>		'importbuddy/lib/requestcore',
-			
+
 		);
-		
+
+		pb_backupbuddy::status( 'details', 'Loading each file into memory for writing master importbuddy file.' );
+
 		$output .= "\n<?php /*\n###PACKDATA,BEGIN\n";
 		foreach( $_packdata as $pack_source => $pack_destination ) {
 			$pack_source = '/' . $pack_source;
@@ -1046,27 +1246,34 @@ class pb_backupbuddy_core {
 		}
 		$output .= "###PACKDATA,END\n*/";
 		$output .= "\n\n\n\n\n\n\n\n\n\n";
-		
+
+		if ( true === $return_not_echo ) {
+			return $output;
+		}
+
 		if ( $output_file == '' ) { // No file so output to browser.
 			header( 'Content-Description: File Transfer' );
 			header( 'Content-Type: text/plain; name=importbuddy.php' );
 			header( 'Content-Disposition: attachment; filename=importbuddy.php' );
 			header( 'Expires: 0' );
 			header( 'Content-Length: ' . strlen( $output ) );
-			
-			flush();
+
+			pb_backupbuddy::flush();
 			echo $output;
-			flush();
-			
+			pb_backupbuddy::flush();
+
 			// BE SURE TO die() AFTER THIS AND NOT OUTPUT TO BROWSER!
 		} else { // Write to file.
-			file_put_contents( $output_file, $output );
+			pb_backupbuddy::status( 'details', 'Writing importbuddy master file to disk.' );
+			if ( false === file_put_contents( $output_file, $output ) ) {
+				pb_backupbuddy::status( 'error', 'Error #483894: Unable to write to file `' . $output_file . '`.' );
+			}
 		}
-				
+
 	} // End importbuddy().
-	
-	
-	
+
+
+
 	// If output file not specified then outputs to browser as download.
 	// IMPORTANT: If outputting to browser (no output file) must die() after outputting content if using AJAX. Do not output to browser anything after this function in this case.
 	public static function serverbuddy( $output_file = '', $serverbuddy_pass_hash = '' ) {
@@ -1074,54 +1281,54 @@ class pb_backupbuddy_core {
 			echo 'Access denied in demo mode.';
 			return;
 		}
-		
+
 		pb_backupbuddy::set_greedy_script_limits(); // Some people run out of PHP memory.
-		
+
 		if ( $serverbuddy_pass_hash == '' ) {
 			if ( !isset( pb_backupbuddy::$options ) ) {
 				pb_backupbuddy::load();
 			}
 			$serverbuddy_pass_hash = pb_backupbuddy::$options['importbuddy_pass_hash'];
 		}
-		
+
 		if ( $serverbuddy_pass_hash == '' ) {
 			$message = 'Error #9032c: Warning only - You have not set a password to generate the ServerBuddy script yet on the BackupBuddy Settings page. If you were trying to download ServerBuddy then you may have a plugin confict preventing the page from prompting you to enter a password.';
 			pb_backupbuddy::status( 'warning', $message );
 			return false;
 		}
-		
+
 		$output = file_get_contents( pb_backupbuddy::plugin_path() . '/_serverbuddy/_serverbuddy.php' );
 		if ( $serverbuddy_pass_hash != '' ) {
 			$output = preg_replace('/#PASSWORD#/', $serverbuddy_pass_hash, $output, 1 ); // Only replaces first instance.
 		}
 		$output = preg_replace('/#VERSION#/', pb_backupbuddy::settings( 'version' ), $output, 1 ); // Only replaces first instance.
-		
+
 		// PACK SERVERBUDDY
 		$_packdata = array( // NO TRAILING OR PRECEEDING SLASHES!
-			
+
 			'_serverbuddy/serverbuddy'							=>		'serverbuddy',
 			'classes/_migrate_database.php'						=>		'serverbuddy/classes/_migrate_database.php',
-			'classes/core.php'									=>		'serverbuddy/classes/core.php',			
-			
+			'classes/core.php'									=>		'serverbuddy/classes/core.php',
+
 			'images/working.gif'								=>		'serverbuddy/images/working.gif',
 			'images/bullet_go.png'								=>		'serverbuddy/images/bullet_go.png',
 			'images/favicon.png'								=>		'serverbuddy/images/favicon.png',
 			'images/sort_down.png'								=>		'serverbuddy/images/sort_down.png',
-			
-			
+
+
 			'lib/dbreplace'										=>		'serverbuddy/lib/dbreplace',
 			'lib/commandbuddy'									=>		'serverbuddy/lib/commandbuddy',
 			'lib/zipbuddy'										=>		'serverbuddy/lib/zipbuddy',
 			'lib/mysqlbuddy'									=>		'serverbuddyy/lib/mysqlbuddy',
 			'lib/textreplacebuddy'								=>		'serverbuddy/lib/textreplacebuddy',
-			
+
 			'pluginbuddy'										=>		'serverbuddy/pluginbuddy',
-			
+
 			'controllers/pages/server_info'						=>		'serverbuddy/controllers/pages/server_info',
-			'controllers/pages/server_info.php'					=>		'serverbuddy/controllers/pages/server_info.php',
-			
+			'controllers/pages/server_tools.php'					=>		'serverbuddy/controllers/pages/server_tools.php',
+
 		);
-		
+
 		$output .= "\n<?php /*\n###PACKDATA,BEGIN\n";
 		foreach( $_packdata as $pack_source => $pack_destination ) {
 			$pack_source = '/' . $pack_source;
@@ -1143,65 +1350,73 @@ class pb_backupbuddy_core {
 		}
 		$output .= "###PACKDATA,END\n*/";
 		$output .= "\n\n\n\n\n\n\n\n\n\n";
-		
+
 		if ( $output_file == '' ) { // No file so output to browser.
 			header( 'Content-Description: File Transfer' );
 			header( 'Content-Type: text/plain; name=importbuddy.php' );
 			header( 'Content-Disposition: attachment; filename=importbuddy.php' );
 			header( 'Expires: 0' );
 			header( 'Content-Length: ' . strlen( $output ) );
-			
-			flush();
+
+			pb_backupbuddy::flush();
 			echo $output;
-			flush();
-			
+			pb_backupbuddy::flush();
+
 			// BE SURE TO die() AFTER THIS AND NOT OUTPUT TO BROWSER!
 		} else { // Write to file.
 			file_put_contents( $output_file, $output );
 		}
-				
+
 	} // End serverbuddy().
-	
-	
-	
+
+
+
 	// TODO: RepairBuddy is not yet converted into new framework so just using pre-BB3.0 version for now.
-	public function repairbuddy( $output_file = '' ) {
+	public static function repairbuddy( $output_file = '' ) {
 		if ( defined( 'PB_DEMO_MODE' ) ) {
 			echo 'Access denied in demo mode.';
 			return;
 		}
-		
+
 		if ( !isset( pb_backupbuddy::$options ) ) {
 			pb_backupbuddy::load();
 		}
 		$output = file_get_contents( pb_backupbuddy::plugin_path() . '/_repairbuddy.php' );
-		if ( pb_backupbuddy::$options['repairbuddy_pass_hash'] != '' ) {
-			$output = preg_replace('/#PASSWORD#/', pb_backupbuddy::$options['repairbuddy_pass_hash'], $output, 1 ); // Only replaces first instance.
+		if ( pb_backupbuddy::$options['importbuddy_pass_hash'] != '' ) {
+			$output = preg_replace('/#PASSWORD#/', pb_backupbuddy::$options['importbuddy_pass_hash'], $output, 1 ); // Only replaces first instance.
 		}
 		$output = preg_replace('/#VERSION#/', pb_backupbuddy::settings( 'version' ), $output, 1 ); // Only replaces first instance.
-		
-		
+
+
 		if ( $output_file == '' ) { // No file so output to browser.
 			header( 'Content-Description: File Transfer' );
 			header( 'Content-Type: text/plain; name=repairbuddy.php' );
 			header( 'Content-Disposition: attachment; filename=repairbuddy.php' );
 			header( 'Expires: 0' );
 			header( 'Content-Length: ' . strlen( $output ) );
-			
-			flush();
+
+			pb_backupbuddy::flush();
 			echo $output;
-			flush();
-			
+			pb_backupbuddy::flush();
+
 			// BE SURE TO die() AFTER THIS AND NOT OUTPUT TO BROWSER!
 		} else { // Write to file.
 			file_put_contents( $output_file, $output );
 		}
-				
+
 	} // End repairbuddy().
-	
-	
-	
-	function pretty_destination_type( $type ) {
+
+
+
+	/* pretty_destination_type()
+	 *
+	 * Take a destination type slug and change it into a user-friendly display of the destination type.
+	 *
+	 * @param	string		Internal destination slug. Eg: s3
+	 * @return	string		Friendly destination title. Eg: Amazon S3
+	 *
+	 */
+	public static function pretty_destination_type( $type ) {
 		if ( $type == 'rackspace' ) {
 			return 'Rackspace';
 		} elseif ( $type == 'email' ) {
@@ -1216,22 +1431,33 @@ class pb_backupbuddy_core {
 			return $type;
 		}
 	} // End pretty_destination_type().
-	
-	
-	
-	// $max_depth	int		Maximum depth of tree to display.  Npte that deeper depths are still traversed for size calculations.
-	function build_icicle( $dir, $base, $icicle_json, $max_depth = 10, $depth_count = 0, $is_root = true ) {
+
+
+
+	/* build_icicle()
+	 *
+	 * Build directory tree for use with the "icicle" javascript library for the graphical directory display on Server Tools page.
+	 *
+	 * @param	string	$dir			
+	 * @param	?		$base			
+	 * @param	?		$icicle_json	
+	 * @param	int		$max_depth		Maximum depth of tree to display.  Note that deeper depths are still traversed for size calculations. Default: 10
+	 * @param	int		$depth_count	Default: 0
+	 * @param	bool	$is_root		Default: true
+	 *
+	 */
+	public static function build_icicle( $dir, $base, $icicle_json, $max_depth = 10, $depth_count = 0, $is_root = true ) {
 		$bg_color = '005282';
-		
+
 		$depth_count++;
 		$bg_color = dechex( hexdec( $bg_color ) - ( $depth_count * 15 ) );
-		
+
 		$icicle_json = '{' . "\n";
-		
+
 		$dir_name = $dir;
 		$dir_name = str_replace( ABSPATH, '', $dir );
 		$dir_name = str_replace( '\\', '/', $dir_name );
-		
+
 		$dir_size = 0;
 		$sub = opendir( $dir );
 		$has_children = false;
@@ -1239,28 +1465,28 @@ class pb_backupbuddy_core {
 			if ( ( $file == '.' ) || ( $file == '..' ) ) {
 				continue; // Next loop.
 			} elseif ( is_dir( $dir . '/' . $file ) ) {
-				
+
 				$dir_array = '';
-				$response = $this->build_icicle( $dir . '/' . $file, $base, $dir_array, $max_depth, $depth_count, false );
+				$response = self::build_icicle( $dir . '/' . $file, $base, $dir_array, $max_depth, $depth_count, false );
 				if ( ( $max_depth-1 > 0 ) || ( $max_depth == -1 ) ) { // Only adds to the visual tree if depth isnt exceeded.
 					if ( $max_depth > 0 ) {
 						$max_depth = $max_depth - 1;
 					}
-					
+
 					if ( $has_children === false ) { // first loop add children section
 						$icicle_json .= '"children": [' . "\n";
 					} else {
 						$icicle_json .= ',';
 					}
 					$icicle_json .= $response[0];
-					
+
 					$has_children = true;
 				}
 				$dir_size += $response[1];
 				unset( $response );
 				unset( $file );
-				
-				
+
+
 			} else {
 				$stats = stat( $dir . '/' . $file );
 				$dir_size += $stats['size'];
@@ -1269,59 +1495,51 @@ class pb_backupbuddy_core {
 		}
 		closedir( $sub );
 		unset( $sub );
-		
+
 		if ( $has_children === true ) {
 			$icicle_json .= ' ]' . "\n";
 		}
-		
+
 		if ( $has_children === true ) {
 			$icicle_json .= ',';
 		}
-		
+
 		$icicle_json .= '"id": "node_' . str_replace( '/', ':', $dir_name ) . ': ^' . str_replace( ' ', '~', pb_backupbuddy::$format->file_size( $dir_size ) ) . '"' . "\n";
-		
+
 		$dir_name = str_replace( '/', '', strrchr( $dir_name, '/' ) );
 		if ( $dir_name == '' ) { // Set root to be /.
 			$dir_name = '/';
 		}
 		$icicle_json .= ', "name": "' . $dir_name . ' (' . pb_backupbuddy::$format->file_size( $dir_size ) . ')"' . "\n";
-		
+
 		$icicle_json .= ',"data": { "$dim": ' . ( $dir_size + 10 ) . ', "$color": "#' . str_pad( $bg_color, 6, '0', STR_PAD_LEFT ) . '" }' . "\n";
 		$icicle_json .= '}';
-		
+
 		if ( $is_root !== true ) {
 			//$icicle_json .= ',x';
 		}
-		
+
 		return array( $icicle_json, $dir_size );
 	} // End build_icicle().
-	
-	
+
+
+
 	// return array of tests and their results.
-	public function preflight_check() {
+	public static function preflight_check() {
 		$tests = array();
-		
-		
+
 		// MULTISITE BETA WARNING.
-		if ( is_multisite() && pb_backupbuddy::$classes['core']->is_network_activated() && !defined( 'PB_DEMO_MODE' ) ) { // Multisite installation.
+		if ( is_multisite() && backupbuddy_core::is_network_activated() && !defined( 'PB_DEMO_MODE' ) ) { // Multisite installation.
 			$tests[] = array(
 				'test'		=>	'multisite_beta',
 				'success'	=>	false,
 				'message'	=>	'WARNING: BackupBuddy Multisite functionality is EXPERIMENTAL and NOT officially supported. Multiple issues are known. Usage of it is at your own risk and should not be relied upon. Standalone WordPress sites are suggested. You may use the "Export" feature to export your subsites into standalone WordPress sites. To enable experimental BackupBuddy Multisite functionality you must add the following line to your wp-config.php file: <b>define( \'PB_BACKUPBUDDY_MULTISITE_EXPERIMENT\', true );</b>
 								'
 			);
-			/*
-			$tests[] = array(
-				'test'		=>	'multisite_beta_35',
-				'success'	=>	false,
-				'message'	=>	'WARNING: Multisite running on WordPress v3.5 may have introduced multiple issues with importing sites into a Network, possibly including problems with media, users, and URL migration. Only using BackupBuddy with standalone sites is highly recommended.'
-			);
-			*/
 		} // end network-activated multisite.
-		
-		
+
 		// LOOPBACKS TEST.
-		if ( ( $loopback_response = $this->loopback_test() ) === true ) {
+		if ( ( $loopback_response = self::loopback_test() ) === true ) {
 			$success = true;
 			$message = '';
 		} else { // failed
@@ -1329,7 +1547,8 @@ class pb_backupbuddy_core {
 			if ( defined( 'ALTERNATE_WP_CRON' ) && ( ALTERNATE_WP_CRON == true ) ) {
 				$message = __('Running in Alternate WordPress Cron mode. HTTP Loopback Connections are not enabled on this server but you have overridden this in the wp-config.php file (this is a good thing).', 'it-l10n-backupbuddy' ) . ' <a href="http://ithemes.com/codex/page/BackupBuddy:_Frequent_Support_Issues#HTTP_Loopback_Connections_Disabled" target="_new">' . __('Additional Information Here', 'it-l10n-backupbuddy' ) . '</a>.';
 			} else {
-				$message = __('HTTP Loopback Connections are not enabled on this server. You may encounter stalled, significantly delayed backups, or other difficulties.', 'it-l10n-backupbuddy' ) . ' <a href="http://ithemes.com/codex/page/BackupBuddy:_Frequent_Support_Issues#HTTP_Loopback_Connections_Disabled" target="_new">' . __('Click for instructions on how to resolve this issue.', 'it-l10n-backupbuddy' ) . '</a>';
+				$message = __('HTTP Loopback Connections are not enabled on this server or are not functioning properly. You may encounter stalled, significantly delayed backups, or other difficulties. See details in the box below. This may be caused by a conflicting plugin such as a caching plugin.', 'it-l10n-backupbuddy' ) . ' <a href="http://ithemes.com/codex/page/BackupBuddy:_Frequent_Support_Issues#HTTP_Loopback_Connections_Disabled" target="_new">' . __('Click for instructions on how to resolve this issue.', 'it-l10n-backupbuddy' ) . '</a>';
+				$message .= ' <b>Details:</b> <textarea style="height: 50px; width: 100%;">' . $loopback_response . '</textarea>';
 			}
 		}
 		$tests[] = array(
@@ -1337,15 +1556,14 @@ class pb_backupbuddy_core {
 			'success'	=>	$success,
 			'message'	=>	$message,
 		);
-		
-		
+
 		// POSSIBLE CACHING PLUGIN CONFLICT WARNING.
 		$success = true;
 		$message = '';
+		$found_plugins = array();
 		if ( ! is_multisite() ) {
 			$active_plugins = serialize( get_option( 'active_plugins' ) );
-			$found_plugins = array();
-			foreach( $this->warn_plugins as $warn_plugin => $warn_plugin_title ) {
+			foreach( self::$warn_plugins as $warn_plugin => $warn_plugin_title ) {
 				if ( FALSE !== strpos( $active_plugins, $warn_plugin ) ) { // Plugin active.
 					$found_plugins[] = $warn_plugin_title;
 					$success = false;
@@ -1363,11 +1581,9 @@ class pb_backupbuddy_core {
 			'success'	=>	$success,
 			'message'	=>	$message,
 		);
-		
-		
-		
+
 		// WORDPRESS IN SUBDIRECTORIES TEST.
-		$wordpress_locations = $this->get_wordpress_locations();
+		$wordpress_locations = self::get_wordpress_locations();
 		if ( count( $wordpress_locations ) > 0 ) {
 			$success = false;
 			$message = __( 'WordPress may have been detected in one or more subdirectories. Backing up multiple instances of WordPress may result in server timeouts due to increased backup time. You may exclude WordPress directories via the Settings page. Detected non-excluded locations:', 'it-l10n-backupbuddy' ) . ' ' . implode( ', ', $wordpress_locations );
@@ -1380,10 +1596,9 @@ class pb_backupbuddy_core {
 			'success'	=>	$success,
 			'message'	=>	$message,
 		);
-		
-		
+
 		// Log file directory writable for status logging.
-		$status_directory = WP_CONTENT_DIR . '/uploads/pb_' . pb_backupbuddy::settings( 'slug' ) . '/';
+		$status_directory = backupbuddy_core::getLogDirectory();
 		if ( ! is_writable( $status_directory ) ) {
 			$success = false;
 			$message = 'The status log file directory `' . $status_directory . '` is not writable. Please verify permissions before creating a backup. Backup status information will be unavailable until this is resolved.';
@@ -1396,27 +1611,24 @@ class pb_backupbuddy_core {
 			'success'	=>	$success,
 			'message'	=>	$message,
 		);
-		
-		
+
 		// CHECK ZIP AVAILABILITY.
 		require_once( pb_backupbuddy::plugin_path() . '/lib/zipbuddy/zipbuddy.php' );
-		
+
 		if ( !isset( pb_backupbuddy::$classes['zipbuddy'] ) ) {
-			pb_backupbuddy::$classes['zipbuddy'] = new pluginbuddy_zipbuddy( pb_backupbuddy::$options['backup_directory'] );
+			pb_backupbuddy::$classes['zipbuddy'] = new pluginbuddy_zipbuddy( backupbuddy_core::getBackupDirectory() );
 		}
-		
-		
-		
+
 		/***** BEGIN LOOKING FOR UNFINISHED RECENT BACKUPS *****/
 		if ( '' != pb_backupbuddy::$options['last_backup_serial'] ) {
 			require_once( pb_backupbuddy::plugin_path() . '/classes/fileoptions.php' );
-			$backup_options = new pb_backupbuddy_fileoptions( pb_backupbuddy::$options['log_directory'] . 'fileoptions/' . pb_backupbuddy::$options['last_backup_serial'] . '.txt', $read_only = true );
+			$backup_options = new pb_backupbuddy_fileoptions( backupbuddy_core::getLogDirectory() . 'fileoptions/' . pb_backupbuddy::$options['last_backup_serial'] . '.txt', $read_only = true );
 			if ( true !== ( $result = $backup_options->is_ok() ) || ( ! isset( $backup_options->options['updated_time'] ) ) ) {
 				// NOTE: If this files during a backup it may try to read the fileoptions file too early due to the last_backup_serial being set. Suppressing errors for now.
-				pb_backupbuddy::status( 'details', 'Unable to retrieve fileoptions file (this is normal if a backup is currently in process & may be ignored) `' . pb_backupbuddy::$options['log_directory'] . 'fileoptions/' . pb_backupbuddy::$options['last_backup_serial'] . '.txt' . '`. Err 54478236765. Details: `' . $result . '`.' );
+				pb_backupbuddy::status( 'details', 'Unable to retrieve fileoptions file (this is normal if a backup is currently in process & may be ignored) `' . backupbuddy_core::getLogDirectory() . 'fileoptions/' . pb_backupbuddy::$options['last_backup_serial'] . '.txt' . '`. Err 54478236765. Details: `' . $result . '`.' );
 			} else {
 				if ( $backup_options->options['updated_time'] < 180 ) { // Been less than 3min since last backup.
-					
+
 					if ( !empty( $backup_options->options['steps'] ) ) { // Look for incomplete steps.
 						$found_unfinished = false;
 						foreach( $backup_options->options['steps'] as $step ) {
@@ -1425,27 +1637,25 @@ class pb_backupbuddy_core {
 								break;
 							}
 						} // end foreach.
-						
+
 						if ( $found_unfinished === true ) {
 							$tests[] = array(
 								'test'		=>	'recent_backup',
 								'success'	=>	false,
 								'message'	=>	__('A backup was recently started and reports unfinished steps. You should wait unless you are sure the previous backup has completed or failed to avoid placing a heavy load on your server.', 'it-l10n-backupbuddy' ) .
-												' Last updated: ' . pb_backupbuddy::$format->date( $backup_options->options['updated_time'] ) . '; '.
-												' Serial: ' . pb_backupbuddy::$options['last_backup_serial']
-								,
+									' Last updated: ' . pb_backupbuddy::$format->date( $backup_options->options['updated_time'] ) . '; '.
+									' Serial: ' . pb_backupbuddy::$options['last_backup_serial']
+							,
 							);
 						} // end $found_unfinished === true.
-						
+
 					} // end if.
-					
+
 				}
 			}
 		}
 		/***** END LOOKING FOR UNFINISHED RECENT BACKUPS *****/
-		
-		
-		
+
 		/***** BEGIN LOOKING FOR BACKUP FILES IN SITE ROOT *****/
 		$files = glob( ABSPATH . 'backup-*.zip' );
 		if ( !is_array( $files ) || empty( $files ) ) {
@@ -1463,15 +1673,13 @@ class pb_backupbuddy_core {
 			);
 		}
 		/***** END LOOKING FOR BACKUP FILES IN SITE ROOT *****/
-		
-		
-		
+
 		return $tests;
-		
+
 	} // End preflight_check().
-	
-	
-	
+
+
+
 	// returns true on success, error message otherwise.
 	/*	loopback_test()
 	 *	
@@ -1484,9 +1692,10 @@ class pb_backupbuddy_core {
 	 *	@param		
 	 *	@return		boolean		True on success, string error message otherwise.
 	 */
-	function loopback_test() {
+	public static function loopback_test() {
 		$loopback_url = admin_url('admin-ajax.php');
 		pb_backupbuddy::status( 'details', 'Testing loopback connections by connecting back to site at the URL: `' . $loopback_url . '`. It should display simply "0" or "-1" in the body.' );
+
 		$response = wp_remote_get(
 			$loopback_url,
 			array(
@@ -1500,7 +1709,7 @@ class pb_backupbuddy_core {
 				'cookies' => array()
 			)
 		);
-		
+
 		if( is_wp_error( $response ) ) { // Loopback failed. Some kind of error.
 			$error = $response->get_error_message();
 			pb_backupbuddy::status( 'error', 'Loopback test error: `' . $error . '`.' );
@@ -1510,450 +1719,255 @@ class pb_backupbuddy_core {
 				pb_backupbuddy::status( 'details', 'HTTP Loopback test success. Returned `' . $response['body'] . '`.' );
 				return true;
 			} else { // Loopback failed.
-				$error = 'A loopback seemed to occur but the value `' . $response['body'] . '` was not correct.';
+				$error = 'Connected to server but unexpected output: ' . htmlentities( $response['body'] );
 				pb_backupbuddy::status( 'error', $error );
 				return $error;
 			}
 		}
-	}
-	
-	
-	
-	
-	// Returns array of subdirectories that contain WordPress.
-	function get_wordpress_locations() {
+	} // End loopback_test().
+
+
+
+	/* get_wordpress_locations()
+	 *
+	 * Get an array of subdirectories where potential WordPress installations have been detected.
+	 *
+	 * @return	array	Array of full paths, WITHOUT trailing slashes.
+	 *
+	 */
+	public static function get_wordpress_locations() {
 		$wordpress_locations = array();
-		
+
 		$files = glob( ABSPATH . '*/' );
 		if ( !is_array( $files ) || empty( $files ) ) {
 			$files = array();
 		}
-		
+
 		foreach( $files as $file ) {
 			if ( file_exists( $file . 'wp-config.php' ) ) {
 				$wordpress_locations[]  = rtrim( '/' . str_replace( ABSPATH, '', $file ), '/\\' );
 			}
 		}
-		
+
 		// Remove any excluded directories from showing up in this.
-		$directory_exclusions = $this->get_directory_exclusions();		
+		$directory_exclusions = self::get_directory_exclusions( pb_backupbuddy::$options['profiles'][0] ); // default profile.
 		$wordpress_locations = array_diff( $wordpress_locations, $directory_exclusions );
-		
+
 		return $wordpress_locations;
-	}
-	
-	
-	
-	
-		
-	
-	
-	// TODO: coming soon.
-	// Run through potential orphaned files, data structures, etc caused by failed backups and clean things up.
-	// Also verifies anti-directory browsing files exists, etc.
-	function periodic_cleanup( $backup_age_limit = 43200, $die_on_fail = true ) {
-		
-		
-		
-		$max_importbuddy_age = 60*60*1; // 1hr - Max age, in seconds, importbuddy files can be there before cleaning up (delay useful if just imported and testing out site).
-		$max_status_log_age = 48; // Max age in hours.
-		$max_site_log_size = pb_backupbuddy::$options['max_site_log_size'] * 1024 * 1024; // in bytes.
-		
-		pb_backupbuddy::status( 'message', 'Starting cleanup procedure for BackupBuddy v' . pb_backupbuddy::settings( 'version' ) . '.' );
-		
-		if ( !isset( pb_backupbuddy::$options ) ) {
-			$this->load();
-		}
-		
-		
-		// TODO: Check for orphaned .gz files in root from PCLZip.
-		
-		
-		// Cleanup backup itegrity portion of array (status logging info inside function).
-		// DEPRECATED: $this->trim_backups_integrity_stats();
-		
-		
-		/***** BEGIN CLEANUP LOGS *****/
-		
-		// Purge old logs.
-		pb_backupbuddy::status( 'details', 'Cleaning up old logs.' );
-		$log_directory = WP_CONTENT_DIR . '/uploads/pb_' . pb_backupbuddy::settings( 'slug' ) . '/';
-		// Purge individual backup status logs unmodified in certain number of hours.
-		$files = glob( $log_directory . 'status-*.txt' );
-		if ( is_array( $files ) && !empty( $files ) ) { // For robustness. Without open_basedir the glob() function returns an empty array for no match. With open_basedir in effect the glob() function returns a boolean false for no match.
-			foreach( $files as $file ) {
-				$file_stats = stat( $file );
-				if ( ( time() - $file_stats['mtime'] ) > $max_status_log_age ) {
-					@unlink( $file );
-				}
-			}
-		}
-		
-		// Purge site-wide log if over certain size.
-		$files = glob( $log_directory . 'log-*.txt' );
-		if ( is_array( $files ) && !empty( $files ) ) { // For robustness. Without open_basedir the glob() function returns an empty array for no match. With open_basedir in effect the glob() function returns a boolean false for no match.
-			foreach( $files as $file ) {
-				$file_stats = stat( $file );
-				if ( $file_stats['size'] > ( $max_site_log_size ) ) {
-					$this->mail_error( 'NOTICE ONLY (not an error): A BackupBuddy log file has exceeded the size threshold of ' . $max_site_log_size . ' KB and has been deleted to maintain performance. This is only a notice. Deleted log file: ' . $file . '.' );
-					@unlink( $file );
-				}
-			}
-		}
-		
-		/***** END CLEANUP LOGS *****/
-		
-		
-		
-		// Cleanup any temporary local destinations.
-		pb_backupbuddy::status( 'details', 'Cleaning up any temporary local destinations.' );
-		foreach( pb_backupbuddy::$options['remote_destinations'] as $destination_id => $destination ) {
-			if ( ( $destination['type'] == 'local' ) && ( isset( $destination['temporary'] ) && ( $destination['temporary'] === true ) ) ) { // If local and temporary.
-				if ( ( time() - $destination['created'] ) > $backup_age_limit ) { // Older than 12 hours; clear out!
-					pb_backupbuddy::status( 'details', 'Cleaned up stale local destination `' . $destination_id . '`.' );
-					unset( pb_backupbuddy::$options['remote_destinations'][$destination_id] );
-					pb_backupbuddy::save();
-				}
-			}
-		}
-		
-		
-		// Cleanup excess remote sending stats.
-		pb_backupbuddy::status( 'details', 'Cleaning up remote send stats.' );
-		$this->trim_remote_send_stats();
-		
-		
-		// Verify existance of anti-directory browsing files in backup directory.
-		pb_backupbuddy::status( 'details', 'Verifying anti-directory browsing security on backup directory.' );
-		pb_backupbuddy::anti_directory_browsing( pb_backupbuddy::$options['backup_directory'], $die_on_fail );
-		
-		
-		// Verify existance of anti-directory browsing files in status log directory.
-		pb_backupbuddy::status( 'details', 'Verifying anti-directory browsing security on status log directory.' );
-		$status_directory = WP_CONTENT_DIR . '/uploads/pb_' . pb_backupbuddy::settings( 'slug' ) . '/';
-		pb_backupbuddy::anti_directory_browsing( $status_directory, $die_on_fail, $deny_all = true );
-		
-		
-		// Verify existance of anti-directory browsing files in temp fileoptions directory.
-		pb_backupbuddy::anti_directory_browsing( pb_backupbuddy::$options['log_directory'] . 'fileoptions', $die_on_fail = false, $deny_all = true );
-		
-		
-		require_once( pb_backupbuddy::plugin_path() . '/classes/fileoptions.php' );
-		
-		// Purge fileoptions files without matching backup file in existance.
-		pb_backupbuddy::status( 'details', 'Cleaning up old backup fileoptions option files.' );
-		$fileoptions_directory = pb_backupbuddy::$options['log_directory'] . 'fileoptions/';
-		$files = glob( $fileoptions_directory . '*.txt' );
-		if ( is_array( $files ) && !empty( $files ) ) { // For robustness. Without open_basedir the glob() function returns an empty array for no match. With open_basedir in effect the glob() function returns a boolean false for no match.
-			foreach( $files as $file ) {
-				$backup_options = new pb_backupbuddy_fileoptions( $file, $read_only = true );
-				if ( true !== ( $result = $backup_options->is_ok() ) ) {
-					pb_backupbuddy::status( 'error', 'Error retrieving fileoptions file `' . $file . '`. Err 335353266.' );
-				} else {
-					if ( isset( $backup_options->options['archive_file'] ) ) {
-						if ( ! file_exists( $backup_options->options['archive_file'] ) ) {
-							if ( false === unlink( $file ) ) {
-								pb_backupbuddy::status( 'error', 'Unable to delete orphaned fileoptions file `' . $file . '`.' );
-							}
-						} else { // Deleted.
-							if ( file_exists( $file . '.lock' ) ) {
-								@unlink( $file . '.lock' );
-							}
-						}
-					}
-				}
-			}
-		}
-		
-		
-		// Purge any old zip file viewing fileoptions files.
-		$max_cache_time = 86400; // Max time in seconds to keep files.
-		pb_backupbuddy::status( 'details', 'Cleaning up old zip file viewer fileoptions option files.' );
-		$files = glob( $fileoptions_directory . '*.txt' );
-		if ( is_array( $files ) && !empty( $files ) ) {
-			foreach( $files as $file ) {
-				if ( ( time() - filemtime( $file ) ) > $max_cache_time ) {
-					if ( false === @unlink( $file ) ) {
-						pb_backupbuddy::alert( 'Error #849353975847826. Unable to wipe cached fileoptions file `' . $file . '`.' );
-					}
-					pb_backupbuddy::status( 'details', 'Trimmed expired fileoptions file for zip viewer: `' . $file . '`.' );
-				}
-			}
-		}
-		
-		
-		// Handle high security mode archives directory .htaccess system. If high security backup directory mode: Make sure backup archives are NOT downloadable by default publicly. This is only lifted for ~8 seconds during a backup download for security. Overwrites any existing .htaccess in this location.
-		if ( pb_backupbuddy::$options['lock_archives_directory'] == '0' ) { // Normal security mode. Put normal .htaccess.
-			pb_backupbuddy::status( 'details', 'Removing .htaccess high security mode for backups directory. Normal mode .htaccess to be added next.' );
-			// Remove high security .htaccess.
-			if ( file_exists( pb_backupbuddy::$options['backup_directory'] . '.htaccess' ) ) {
-				$unlink_status = @unlink( pb_backupbuddy::$options['backup_directory'] . '.htaccess' );
-				if ( $unlink_status === false ) {
-					pb_backupbuddy::alert( 'Error #844594. Unable to temporarily remove .htaccess security protection on archives directory to allow downloading. Please verify permissions of the BackupBuddy archives directory or manually download via FTP.' );
-				}
-			}
-			
-			// Place normal .htaccess.
-			pb_backupbuddy::anti_directory_browsing( pb_backupbuddy::$options['backup_directory'], $die_on_fail );
-		
-		} else { // High security mode. Make sure high security .htaccess in place.
-			pb_backupbuddy::status( 'details', 'Adding .htaccess high security mode for backups directory.' );
-			$htaccess_creation_status = @file_put_contents( pb_backupbuddy::$options['backup_directory'] . '.htaccess', 'deny from all' );
-			if ( $htaccess_creation_status === false ) {
-				pb_backupbuddy::alert( 'Error #344894545. Security Warning! Unable to create security file (.htaccess) in backups archive directory. This file prevents unauthorized downloading of backups should someone be able to guess the backup location and filenames. This is unlikely but for best security should be in place. Please verify permissions on the backups directory.' );
-			}
-			
-		}
-		
-		
-		// Verify existance of anti-directory browsing files in temporary directory.
-		pb_backupbuddy::status( 'details', 'Verifying anti-directory browsing security on temp directory.' );
-		pb_backupbuddy::anti_directory_browsing( pb_backupbuddy::$options['temp_directory'], $die_on_fail, $deny_all = true );
-		
-		
-		
-		// Remove any copy of importbuddy.php in root.
-		pb_backupbuddy::status( 'details', 'Cleaning up importbuddy.php script in site root if it exists & is not very recent.' );
-		if ( file_exists( ABSPATH . 'importbuddy.php' ) ) {
-			$modified = filemtime( ABSPATH . 'importbuddy.php' );
-			if ( ( FALSE === $modified ) || ( time() > ( $modified + $max_importbuddy_age ) ) ) { // If time modified unknown OR was modified long enough ago.
-				pb_backupbuddy::status( 'details', 'Unlinked importbuddy.php in root of site.' );
-				unlink( ABSPATH . 'importbuddy.php' );
-			} else {
-				pb_backupbuddy::status( 'details', 'SKIPPED unlinking importbuddy.php in root of site as it is fresh and may still be in use.' );
-			}
-		}
-		
-		
-		// Remove any copy of importbuddy directory in root.
-		pb_backupbuddy::status( 'details', 'Cleaning up importbuddy directory in site root if it exists & is not very recent.' );
-		if ( file_exists( ABSPATH . 'importbuddy/' ) ) {
-			$modified = filemtime( ABSPATH . 'importbuddy/' );
-			if ( ( FALSE === $modified ) || ( time() > ( $modified + $max_importbuddy_age ) ) ) { // If time modified unknown OR was modified long enough ago.
-				pb_backupbuddy::status( 'details', 'Unlinked importbuddy directory recursively in root of site.' );
-				pb_backupbuddy::$filesystem->unlink_recursive( ABSPATH . 'importbuddy/' );
-			} else {
-				pb_backupbuddy::status( 'details', 'SKIPPED unlinked importbuddy directory recursively in root of site as it is fresh and may still be in use.' );
-			}
-		}
-		
-		
-		
-		// Remove any old temporary directories in wp-content/uploads/backupbuddy_temp/. Logs any directories it cannot delete.
-		pb_backupbuddy::status( 'details', 'Cleaning up any old temporary zip directories in: wp-content/uploads/backupbuddy_temp/' );
-		$temp_directory = WP_CONTENT_DIR . '/uploads/backupbuddy_temp/';
-		$files = glob( $temp_directory . '*' );
-		if ( is_array( $files ) && !empty( $files ) ) { // For robustness. Without open_basedir the glob() function returns an empty array for no match. With open_basedir in effect the glob() function returns a boolean false for no match.
-			foreach( $files as $file ) {
-				if ( ( strpos( $file, 'index.' ) !== false ) || ( strpos( $file, '.htaccess' ) !== false ) ) { // Index file or htaccess dont get deleted so go to next file.
-					continue;
-				}
-				$file_stats = stat( $file );
-				if ( ( time() - $file_stats['mtime'] ) > $backup_age_limit ) { // If older than 12 hours, delete the log.
-					if ( @pb_backupbuddy::$filesystem->unlink_recursive( $file ) === false ) {
-						pb_backupbuddy::status( 'error', 'Unable to clean up (delete) temporary directory/file: `' . $file . '`. You should manually delete it or check permissions.' );
-					}
-				}
-			}
-		}
-		
-		
-		// Remove any old temporary zip directories: wp-content/uploads/backupbuddy_backups/temp_zip_XXXX/. Logs any directories it cannot delete.
-		pb_backupbuddy::status( 'details', 'Cleaning up any old temporary zip directories in backup directory temp location `' . pb_backupbuddy::$options['backup_directory'] . 'temp_zip_XXXX/`.' );
-		// $temp_directory = WP_CONTENT_DIR . '/uploads/backupbuddy_backups/temp_zip_*';
-		$temp_directory = pb_backupbuddy::$options['backup_directory'] . 'temp_zip_*';
-		$files = glob( $temp_directory . '*' );
-		if ( is_array( $files ) && !empty( $files ) ) { // For robustness. Without open_basedir the glob() function returns an empty array for no match. With open_basedir in effect the glob() function returns a boolean false for no match.
-			foreach( $files as $file ) {
-				if ( ( strpos( $file, 'index.' ) !== false ) || ( strpos( $file, '.htaccess' ) !== false ) ) { // Index file or htaccess dont get deleted so go to next file.
-					continue;
-				}
-				$file_stats = stat( $file );
-				if ( ( time() - $file_stats['mtime'] ) > $backup_age_limit ) { // If older than 12 hours, delete the log.
-					if ( @pb_backupbuddy::$filesystem->unlink_recursive( $file ) === false ) {
-						$message = 'BackupBuddy was unable to clean up (delete) temporary directory/file: `' . $file . '`. You should manually delete it and/or verify proper file permissions to allow BackupBuddy to clean up for you.';
-						pb_backupbuddy::status( 'error', $message );
-						$this->mail_error( $message );
-					}
-				}
-			}
-		}
-		
-		@clearstatcache(); // Clears file info stat cache.
-		
-		pb_backupbuddy::status( 'message', 'Finished cleanup procedure.' );
-		
+	} // End get_wordpress_locations().
+
+
+
+	/* periodic_cleanup()
+	 *
+	 * Periodic housekeeping cleanup function to clean up after BackupBuddy. Clean up orphaned files, data structure,
+	 * old log files, etc. Also verifies anti-directory browsing files exist in expected locations and any potential
+	 * problems are handled.
+	 *
+	 * @param	int		$backup_age_limit		Maximum age (in seconds) to allow logs or other transient files/structures to exist after no longer needed. Default: 172800 (48 hours).
+	 * @param	bool	$die_on_fail			Whether or not to die fatally if something goes wrong (such as unable to make anti-directory browsing files).
+	 *
+	 */
+	public static function periodic_cleanup( $backup_age_limit = 172800, $die_on_fail = true ) {
+
+		include( '_periodicCleanup.php' );
+
 	} // End periodic_cleanup().
-	
-	
-	
-	public function final_cleanup( $serial ) {
-		
+
+
+
+	/* final_cleanup()
+	 *
+	 * Final cleanup scheduled by each backup for cleaning up in the future. Helps catch failed backups.
+	 *
+	 * @param	string	$serial		Unique backup serial which we will be cleaning up for.
+	 * @return	null
+	 *
+	 */
+	public static function final_cleanup( $serial ) {
+
 		if ( !isset( pb_backupbuddy::$options ) ) {
 			pb_backupbuddy::load();
 		}
 		pb_backupbuddy::status( 'details', 'cron_final_cleanup started' );
-		
+
 		require_once( pb_backupbuddy::plugin_path() . '/classes/fileoptions.php' );
-		$backup_options = new pb_backupbuddy_fileoptions( pb_backupbuddy::$options['log_directory'] . 'fileoptions/' . $serial . '.txt', $read_only = true );
+		$backup_options = new pb_backupbuddy_fileoptions( backupbuddy_core::getLogDirectory() . 'fileoptions/' . $serial . '.txt', $read_only = true );
 		if ( true !== ( $result = $backup_options->is_ok() ) ) {
 			pb_backupbuddy::status( 'error', 'Unable to open fileoptions file.' );
 		}
-		
+
 		// Delete temporary data directory.
 		if ( isset( $backup_options->options['temp_directory'] ) && file_exists( $backup_options->options['temp_directory'] ) ) {
 			pb_backupbuddy::$filesystem->unlink_recursive( $backup_options->options['temp_directory'] );
 		}
-		
+
 		// Delete temporary zip directory.
 		if ( isset( $backup_options->options['temporary_zip_directory'] ) && file_exists( $backup_options->options['temporary_zip_directory'] ) ) {
 			pb_backupbuddy::$filesystem->unlink_recursive( $backup_options->options['temporary_zip_directory'] );
 		}
-		
+
 		// Delete status log text file.
-		if ( file_exists( pb_backupbuddy::$options['backup_directory'] . 'temp_status_' . $serial . '.txt' ) ) {
-			unlink( pb_backupbuddy::$options['backup_directory'] . 'temp_status_' . $serial. '.txt' );
+		if ( file_exists( backupbuddy_core::getBackupDirectory() . 'temp_status_' . $serial . '.txt' ) ) {
+			unlink( backupbuddy_core::getBackupDirectory() . 'temp_status_' . $serial. '.txt' );
 		}
-				
+
 	} // End final_cleanup().
-	
-	
-	
+
+
+
 	/*	trim_remote_send_stats()
 	 *	
 	 *	Handles trimming the number of remote sends to the most recent ones.
+	 *	Recent transfer logs are kept for DOUBLe the max age as they are important for troubleshooting.
 	 *	
 	 *	@return		null
 	 */
-	public function trim_remote_send_stats() {
-		
+	public static function trim_remote_send_stats( $max_age = 172800 ) {
+
 		$limit = 5; // Maximum number of remote sends to keep track of.
-		
+
+		$send_fileoptions = pb_backupbuddy::$filesystem->glob_by_date( backupbuddy_core::getLogDirectory() . 'fileoptions/send-*.txt' );
+		if ( ! is_array( $send_fileoptions ) ) {
+			$send_fileoptions = array();
+		}
 		// Return if limit not yet met.
-		if ( count( pb_backupbuddy::$options['remote_sends'] ) <= $limit ) {
+		if ( count( $send_fileoptions ) <= $limit ) {
 			return;
 		}
-		
-		// Uses the negative offset of array_slice() to grab the last X number of items from array.
-		pb_backupbuddy::$options['remote_sends'] = array_slice( pb_backupbuddy::$options['remote_sends'], ( $limit * -1 ) );
-		pb_backupbuddy::save();
-		
+
+		$max_age_extended = $max_age * 2;
+		$i = 0;
+		foreach( $send_fileoptions as $send_fileoption ) {
+			$i++;
+			if ( $i > $limit ) {
+				$modified = filemtime( $send_fileoption );
+				if ( ( time() - $modified ) > $max_age_extended ) {
+					if ( false === @unlink( $send_fileoption ) ) {
+						pb_backupbuddy::status( 'error', 'Unable to delete old remote send log file `' . $send_fileoption . '`. You may manually delete it. Check directory permissions for future cleanup.' );
+					}
+				}
+			}
+		}
+
+		return;
+
 	} // End trim_remote_send_stats().
-	
-	
-	
+
+
+
 	/*	get_site_size()
 	 *	
 	 *	Returns an array with the site size and the site size sans exclusions. Saves updates stats in options.
 	 *	
-	 *	@return		array		Index 0: site size; Index 1: site size sans excluded files/dirs.
+	 *	@return		array		Index 0: site size; Index 1: site size sans excluded files/dirs.; Index 2: Total number of objects (files+folders); Index 3: Total objects sans excluded files/folders.
 	 */
-	public function get_site_size() {
-		$exclusions = pb_backupbuddy_core::get_directory_exclusions();
+	public static function get_site_size() {
+		$exclusions = backupbuddy_core::get_directory_exclusions( pb_backupbuddy::$options['profiles'][0] );
 		$dir_array = array();
 		$result = pb_backupbuddy::$filesystem->dir_size_map( ABSPATH, ABSPATH, $exclusions, $dir_array );
 		unset( $dir_array ); // Free this large chunk of memory.
-		
+
 		$total_size = pb_backupbuddy::$options['stats']['site_size'] = $result[0];
 		$total_size_excluded = pb_backupbuddy::$options['stats']['site_size_excluded'] = $result[1];
+		$total_objects = pb_backupbuddy::$options['stats']['site_objects'] = $result[2];
+		$total_objects_excluded = pb_backupbuddy::$options['stats']['site_objects_excluded'] = $result[3];
 		pb_backupbuddy::$options['stats']['site_size_updated'] = time();
 		pb_backupbuddy::save();
-		
-		return array( $total_size, $total_size_excluded );
+
+		return array( $total_size, $total_size_excluded, $total_objects, $total_objects_excluded );
 	} // End get_site_size().
-	
-	
-	
+
+
+
 	/*	get_database_size()
 	 *	
 	 *	Return array of database size, database sans exclusions.
 	 *	
 	 *	@return		array			Index 0: db size, Index 1: db size sans exclusions.
 	 */
-	public function get_database_size() {
+	public static function get_database_size( $profile_id = 0 ) {
 		global $wpdb;
 		$prefix = $wpdb->prefix;
 		$prefix_length = strlen( $wpdb->prefix );
-		
-		$additional_includes = explode( "\n", pb_backupbuddy::$options['mysqldump_additional_includes'] );
-		array_walk( $additional_includes, create_function('&$val', '$val = trim($val);')); 
-		$additional_excludes = explode( "\n", pb_backupbuddy::$options['mysqldump_additional_excludes'] );
-		array_walk( $additional_excludes, create_function('&$val', '$val = trim($val);')); 
-		
+
+		$additional_includes = explode( "\n", pb_backupbuddy::$options['profiles'][$profile_id]['mysqldump_additional_includes'] );
+		array_walk( $additional_includes, create_function('&$val', '$val = trim($val);'));
+		$additional_excludes = explode( "\n", pb_backupbuddy::$options['profiles'][$profile_id]['mysqldump_additional_excludes'] );
+		array_walk( $additional_excludes, create_function('&$val', '$val = trim($val);'));
+
 		$total_size = 0;
 		$total_size_with_exclusions = 0;
-		$result = mysql_query("SHOW TABLE STATUS");
-		while( $rs = mysql_fetch_array( $result ) ) {
+		$rows = $wpdb->get_results( "SHOW TABLE STATUS", ARRAY_A );
+		foreach( $rows as $row ) {
 			$excluded = true; // Default.
-			
+
 			// TABLE STATUS.
-			$resultb = mysql_query("CHECK TABLE `{$rs['Name']}`");
-			while( $rsb = mysql_fetch_array( $resultb ) ) {
-				if ( $rsb['Msg_type'] == 'status' ) {
-					$status = $rsb['Msg_text'];
+			$rowsb = $wpdb->get_results( "CHECK TABLE `{$row['Name']}`", ARRAY_A );
+			foreach( $rowsb as $rowb ) {
+				if ( $rowb['Msg_type'] == 'status' ) {
+					$status = $rowb['Msg_text'];
 				}
 			}
-			mysql_free_result( $resultb );
-			
+			unset( $rowsb );
+
 			// TABLE SIZE.
-			$size = ( $rs['Data_length'] + $rs['Index_length'] );
+			$size = ( $row['Data_length'] + $row['Index_length'] );
 			$total_size += $size;
-			
-			
+
+
 			// HANDLE EXCLUSIONS.
-			if ( pb_backupbuddy::$options['backup_nonwp_tables'] == 0 ) { // Only matching prefix.
-				if ( ( substr( $rs['Name'], 0, $prefix_length ) == $prefix ) OR ( in_array( $rs['Name'], $additional_includes ) ) ) {
-					if ( !in_array( $rs['Name'], $additional_excludes ) ) {
+			if ( pb_backupbuddy::$options['profiles'][$profile_id]['backup_nonwp_tables'] == 0 ) { // Only matching prefix.
+				if ( ( substr( $row['Name'], 0, $prefix_length ) == $prefix ) OR ( in_array( $row['Name'], $additional_includes ) ) ) {
+					if ( !in_array( $row['Name'], $additional_excludes ) ) {
 						$total_size_with_exclusions += $size;
 						$excluded = false;
 					}
 				}
 			} else { // All tables.
-				if ( !in_array( $rs['Name'], $additional_excludes ) ) {
+				if ( !in_array( $row['Name'], $additional_excludes ) ) {
 					$total_size_with_exclusions += $size;
 					$excluded = false;
 				}
 			}
-			
+
 		}
-		
+
 		pb_backupbuddy::$options['stats']['db_size'] = $total_size;
 		pb_backupbuddy::$options['stats']['db_size_excluded'] = $total_size_with_exclusions;
 		pb_backupbuddy::$options['stats']['db_size_updated'] = time();
 		pb_backupbuddy::save();
-		
-		mysql_free_result( $result );
-		
+
+		unset( $rows );
+
 		return array( $total_size, $total_size_with_exclusions );
 	} // End get_database_size().
-	
-	
-	
-	/* Doesnt work?
-	public function error_handler( $error_number, $error_string, $error_file, $error_line ) {
-		pb_backupbuddy::status( 'error', "PHP error caught. Error #`{$error_number}`; Description: `{$error_string}`; File: `{$error_file}`; Line: `{$error_line}`."  );
-		return true;
-	}
-	*/
-	
-	public function kick_db() {
-		
+
+
+
+	/* kick_db()
+	 *
+	 * Attempt to verify the database server is still alive and functioning.  If not, try to re-establish connection.
+	 *
+	 */
+	public static function kick_db() {
+
 		$kick_db = true; // Change true to false for debugging purposes to disable kicker.
-		
+
 		// Need to make sure the database connection is active. Sometimes it goes away during long bouts doing other things -- sigh.
 		// This is not essential so use include and not require (suppress any warning)
 		if ( $kick_db === true ) {
 			pb_backupbuddy::status( 'details', 'kick_db()' );
-			
+
 			pb_backupbuddy::status( 'details', 'Loading DB kicker in case database has gone away.' );
 			@include_once( pb_backupbuddy::plugin_path() . '/lib/wpdbutils/wpdbutils.php' );
 			if ( class_exists( 'pluginbuddy_wpdbutils' ) ) {
 				// This is the database object we want to use
 				global $wpdb;
-				
+
 				// Get our helper object and let it use us to output status messages
 				$dbhelper = new pluginbuddy_wpdbutils( $wpdb );
-				
+
 				// If we cannot kick the database into life then signal the error and return false which will stop the backup
 				// Otherwise all is ok and we can just fall through and let the function return true
 				if ( !$dbhelper->kick() ) {
@@ -1966,65 +1980,63 @@ class pb_backupbuddy_core {
 				pb_backupbuddy::status( 'details', __('Database Server connection status unverified.', 'it-l10n-backupbuddy' ) );
 			}
 		}
-		
+
 	} // End kick_db().
-	
-	
-	
-	public function verify_directories() {
-		
-		// Keep backup directory up to date.
-		//if ( pb_backupbuddy::$options['backup_directory'] != ( ABSPATH . 'wp-content/uploads/backupbuddy_backups/' ) ) {
-		if ( ( pb_backupbuddy::$options['backup_directory'] == '' ) || ( ! @is_writable( pb_backupbuddy::$options['backup_directory'] ) ) ) {
-			$default_backup_dir = ABSPATH . 'wp-content/uploads/backupbuddy_backups/';
-			pb_backupbuddy::status( 'details', 'Backup directory invalid. Updating from `' . pb_backupbuddy::$options['backup_directory'] . '` to the default `' . $default_backup_dir . '`.' );
-			pb_backupbuddy::$options['backup_directory'] = $default_backup_dir;
+
+
+
+	/* verify_directories()
+	 *
+	 * Verify existance and security of key directories. Result available via global $pb_backupbuddy_directory_verification with return value.
+	 *
+	 * @return		bool		true on success creating / verifying, else false.
+	 *
+	 */
+	public static function verify_directories() {
+
+		$success = true;
+
+		// Update backup directory if unable to write to the defined one.
+		if ( ! @is_writable( backupbuddy_core::getBackupDirectory() ) ) {
+			pb_backupbuddy::status( 'details', 'Backup directory invalid. Updating from `' . backupbuddy_core::getBackupDirectory() . '` to default.' );
+			pb_backupbuddy::$options['backup_directory'] = ''; // Reset to default (blank).
 			pb_backupbuddy::save();
 		}
-		// Make backup directory if it does not exist yet.
-		//pb_backupbuddy::status( 'details', 'Verifying backup directory `' . pb_backupbuddy::$options['backup_directory'] . '` exists.' );
-		if ( !file_exists( pb_backupbuddy::$options['backup_directory'] ) ) {
-			pb_backupbuddy::status( 'details', 'Backup directory does not exist. Attempting to create.' );
-			if ( pb_backupbuddy::$filesystem->mkdir( pb_backupbuddy::$options['backup_directory'] ) === false ) {
-				pb_backupbuddy::status( 'error', sprintf( __('Unable to create backup storage directory (%s)', 'it-l10n-backupbuddy' ) , pb_backupbuddy::$options['backup_directory'] ) );
-				pb_backupbuddy::alert( sprintf( __('Unable to create backup storage directory (%s)', 'it-l10n-backupbuddy' ) , pb_backupbuddy::$options['backup_directory'] ), true, '9002' );
-			}
-		}
-		
-		// Keep log directory up to date.
-		if ( ( pb_backupbuddy::$options['log_directory'] == '' ) || ( ! @is_writable( pb_backupbuddy::$options['log_directory'] ) ) ) {
-			$default_log_dir = ABSPATH . 'wp-content/uploads/pb_backupbuddy/';
-			pb_backupbuddy::status( 'details', 'Log directory invalid. Updating from `' . pb_backupbuddy::$options['log_directory'] . '` to the default `' . $default_log_dir . '`.' );
-			pb_backupbuddy::$options['log_directory'] = $default_log_dir;
-			pb_backupbuddy::save();
-		}
-		// Make log directory if it does not exist yet.
-		if ( !file_exists( pb_backupbuddy::$options['log_directory'] ) ) {
-			pb_backupbuddy::status( 'details', 'Log directory does not exist. Attempting to create.' );
-			if ( pb_backupbuddy::$filesystem->mkdir( pb_backupbuddy::$options['log_directory'] ) === false ) {
-				pb_backupbuddy::status( 'error', sprintf( __('Unable to create log directory (%s)', 'it-l10n-backupbuddy' ) , pb_backupbuddy::$options['log_directory'] ) );
-				pb_backupbuddy::alert( sprintf( __('Unable to create log directory (%s)', 'it-l10n-backupbuddy' ) , pb_backupbuddy::$options['log_directory'] ), true, '9002b' );
-			}
+		$response = pb_backupbuddy::anti_directory_browsing( backupbuddy_core::getBackupDirectory(), $die = false );
+		if ( false === $response ) {
+			$success = false;
 		}
 
-		// Keep temp directory up to date.
-		if ( pb_backupbuddy::$options['temp_directory'] != ( ABSPATH . 'wp-content/uploads/backupbuddy_temp/' ) ) {
-			pb_backupbuddy::status( 'details', 'Temporary directory has changed. Updating from `' . pb_backupbuddy::$options['temp_directory'] . '` to `' . ABSPATH . 'wp-content/uploads/backupbuddy_temp/' . '`.' );
-			pb_backupbuddy::$options['temp_directory'] = ABSPATH . 'wp-content/uploads/backupbuddy_temp/';
+		// Update log directory if unable to write to the defined one.
+		if ( ! @is_writable( backupbuddy_core::getLogDirectory() ) ) {
+			pb_backupbuddy::status( 'details', 'Log directory invalid. Updating from `' . backupbuddy_core::getLogDirectory() . '` to default.' );
+			pb_backupbuddy::$options['log_directory'] = ''; // Reset to default (blank).
 			pb_backupbuddy::save();
 		}
-		// Make backup directory if it does not exist yet.
-		if ( !file_exists( pb_backupbuddy::$options['temp_directory'] ) ) {
-			pb_backupbuddy::status( 'details', 'Temporary directory does not exist. Attempting to create.' );
-			if ( pb_backupbuddy::$filesystem->mkdir( pb_backupbuddy::$options['temp_directory'] ) === false ) {
-				pb_backupbuddy::status( 'error', sprintf( __('Unable to create temporary storage directory (%s)', 'it-l10n-backupbuddy' ) , pb_backupbuddy::$options['temp_directory'] ) );
-				pb_backupbuddy::alert( sprintf( __('Unable to create temporary storage directory (%s)', 'it-l10n-backupbuddy' ) , pb_backupbuddy::$options['temp_directory'] ), true, '9002' );
-			}
+		pb_backupbuddy::anti_directory_browsing( backupbuddy_core::getLogDirectory(), $die = false );
+		if ( false === $response ) {
+			$success = false;
 		}
-		
+
+		// Update temp directory if unable to write to the defined one.
+		if ( ! @is_writable( backupbuddy_core::getTempDirectory() ) ) {
+			pb_backupbuddy::status( 'details', 'Temporary directory invalid. Updating from `' . backupbuddy_core::getTempDirectory() . '` to default.' );
+			pb_backupbuddy::$options['temp_directory'] = '';
+			pb_backupbuddy::save();
+		}
+		pb_backupbuddy::anti_directory_browsing( backupbuddy_core::getTempDirectory(), $die = false );
+		if ( false === $response ) {
+			$success = false;
+		}
+
+		global $pb_backupbuddy_directory_verification;
+		$pb_backupbuddy_directory_verification = $success;
+		return $success;
+
 	} // End verify_directories().
-	
-	
+
+
+
 	/* schedule_single_event()
 	 *
 	 * API to wp_schedule_single_event() that also verifies that the schedule actually got created in WordPRess.
@@ -2032,9 +2044,9 @@ class pb_backupbuddy_core {
 	 *
 	 * @return	boolean			True on verified schedule success, else false.
 	 */
-	public function schedule_single_event( $time, $tag, $args ) {
-		$schedule_result = wp_schedule_single_event( $time, $tag, $args );
-		$next_scheduled = wp_next_scheduled( $tag, $args );
+	public static function schedule_single_event( $time, $tag, $args ) {
+		$schedule_result = wp_schedule_single_event( $time, $tag, $args ); // Schedule.
+		$next_scheduled = wp_next_scheduled( $tag, $args ); // Retrieve schedule to verify it stuck.
 		if ( FALSE === $schedule_result ) {
 			pb_backupbuddy::status( 'error', 'Unable to create schedule as wp_schedule_single_event() returned false. A plugin may have prevented it.' );
 			return false;
@@ -2043,12 +2055,12 @@ class pb_backupbuddy_core {
 			pb_backupbuddy::status( 'error', 'WordPress reported success scheduling BUT wp_next_scheduled() could NOT confirm schedule existance. The database may have rejected the update.' );
 			return false;
 		}
-		
+
 		return true;
 	} // End schedule_single_event().
-	
-	
-	
+
+
+
 	/* schedule_event()
 	 *
 	 * API to wp_schedule_event() that also verifies that the schedule actually got created in WordPRess.
@@ -2056,7 +2068,7 @@ class pb_backupbuddy_core {
 	 *
 	 * @return	boolean			True on verified schedule success, else false.
 	 */
-	public function schedule_event( $time, $period, $tag, $args ) {
+	public static function schedule_event( $time, $period, $tag, $args ) {
 		$schedule_result = wp_schedule_event( $time, $period, $tag, $args );
 		$next_scheduled = wp_next_scheduled( $tag, $args );
 		if ( FALSE === $schedule_result ) {
@@ -2067,12 +2079,12 @@ class pb_backupbuddy_core {
 			pb_backupbuddy::status( 'error', 'WordPress reported success scheduling BUT wp_next_scheduled() could NOT confirm schedule existance. The database may have rejected the update.' );
 			return false;
 		}
-		
+
 		return true;
 	} // End schedule_event().
-	
-	
-	
+
+
+
 	/* unschedule_event()
 	 *
 	 * API to wp_unschedule_event() that also verifies that the schedule actually got removed WordPRess.
@@ -2080,7 +2092,7 @@ class pb_backupbuddy_core {
 	 *
 	 * @return	boolean			True on verified schedule deletion success, else false.
 	 */
-	public function unschedule_event( $time, $tag, $args ) {
+	public static function unschedule_event( $time, $tag, $args ) {
 		$unschedule_result = wp_unschedule_event( $time, $tag, $args );
 		$next_scheduled = wp_next_scheduled( $tag, $args );
 		if ( FALSE === $unschedule_result ) {
@@ -2091,12 +2103,12 @@ class pb_backupbuddy_core {
 			pb_backupbuddy::status( 'error', 'WordPress reported success unscheduling BUT wp_next_scheduled() confirmed schedule existance. The database may have rejected the removal.' );
 			return false;
 		}
-		
+
 		return true;
 	} // End unschedule_event().
-	
-	
-	
+
+
+
 	/* normalize_comment_data()
 	 *
 	 * Handle normalizing zip comment data, defaults, etc.
@@ -2104,19 +2116,25 @@ class pb_backupbuddy_core {
 	 * @param	array	$comment	Array of meta data to normalize & apply defaults to.
 	 * @return	array				Normalized array.
 	 */
-	public function normalize_comment_data( $comment ) {
-		
+	public static function normalize_comment_data( $comment ) {
+
 		$defaults = array(
 			'serial'		=>	'',
 			'siteurl'		=>	'',
 			'type'			=>	'',
+			'profile'		=>	'',
 			'created'		=>	'',
+			'db_prefix'		=>	'',
 			'bb_version'	=>	'',
 			'wp_version'	=>	'',
+			'posts'			=>	'',
+			'pages'			=>	'',
+			'comments'		=>	'',
+			'users'			=>	'',
 			'dat_path'		=>	'',
 			'note'			=>	'',
 		);
-		
+
 		if ( ! is_array( $comment ) ) { // Plain text; place in note field.
 			if ( is_string( $comment ) ) {
 				$defaults['note'] = $comment;
@@ -2125,17 +2143,17 @@ class pb_backupbuddy_core {
 		} else { // Array. Merge defaults and return.
 			return array_merge( $defaults, $comment );
 		}
-		
+
 	} // End normalize_comment_data().
-	
-	
-	
+
+
+
 	/* add_backup_schedule()
 	 *
 	 * Adds a new schedule for backing up.
 	 *
 	 * @param	string			$title					Schedule title (user-friendly name).
-	 * @param	string			$type					Type of backup to create( db, full ).
+	 * @param	int				$profile				Profile ID.
 	 * @param	string			$interval				WordPress schedule interval for cron (ie weekly, daily, hourly, etc).
 	 * @param	int				$first_run				Timestamp of when to run the first in this scheduled cron series.
 	 * @param	array 			$remote_destinations	Array of remote destination IDs to send to.
@@ -2144,10 +2162,10 @@ class pb_backupbuddy_core {
 	 * @return	true|string								true on success, else error message string.
 	 *
 	 */
-	public function add_backup_schedule( $title, $type, $interval, $first_run, $remote_destinations = array(), $delete_after = false, $enabled = true ) {
+	public static function add_backup_schedule( $title, $profile, $interval, $first_run, $remote_destinations = array(), $delete_after = false, $enabled = true ) {
 		$schedule = pb_backupbuddy::settings( 'schedule_defaults' );
 		$schedule['title'] = $title;
-		$schedule['type'] = $type;
+		$schedule['profile'] = (int)$profile;
 		$schedule['interval'] = $interval;
 		$schedule['first_run'] = $first_run;
 		$schedule['remote_destinations'] = implode( '|', $remote_destinations );
@@ -2161,12 +2179,12 @@ class pb_backupbuddy_core {
 		} else {
 			$schedule['on_off'] = '1';
 		}
-		
+
 		$next_index = pb_backupbuddy::$options['next_schedule_index']; // v2.1.3: $next_index = end( array_keys( pb_backupbuddy::$options['schedules'] ) ) + 1;
 		pb_backupbuddy::$options['next_schedule_index']++; // This change will be saved in savesettings function below.
 		pb_backupbuddy::$options['schedules'][$next_index] = $schedule;
-		
-		$result = pb_backupbuddy::$classes['core']->schedule_event( $schedule['first_run'], $schedule['interval'], 'pb_backupbuddy-cron_scheduled_backup', array( $next_index ) );
+
+		$result = backupbuddy_core::schedule_event( $schedule['first_run'], $schedule['interval'], 'pb_backupbuddy-cron_scheduled_backup', array( $next_index ) );
 		if ( $result === false ) {
 			return 'Error scheduling event with WordPress. Your schedule may not work properly. Please try again. Error #3488439b. Check your BackupBuddy error log for details.';
 		} else {
@@ -2174,8 +2192,315 @@ class pb_backupbuddy_core {
 			return true;
 		}
 	} // End add_backup_schedule().
-	
-	
-	
-} // Emd Class pb_backupbuddy_core.
-?>
+
+
+
+	/* pretty_meta_info()
+	 *
+	 * Translates meta information field names and values into nice readable forms.
+	 *
+	 * @param	string	$comment_line_name		Meta field name.
+	 * @param	string	$comment_line_value		Value of meta item.
+	 * @return	array|false 					Array with two entries: the updates comment line name and updated comment line value. false if empty.
+	 *
+	 */
+	public static function pretty_meta_info( $comment_line_name, $comment_line_value ) {
+
+		if ( $comment_line_name == 'serial' ) {
+			$comment_line_name = 'Unique serial identifier';
+		} elseif ( $comment_line_name == 'siteurl' ) {
+			$comment_line_name = 'Site URL';
+		} elseif ( $comment_line_name == 'type' ) {
+			$comment_line_name = 'Backup Type';
+			if ( $comment_line_value == 'db' ) {
+				$comment_line_value = 'Database';
+			} elseif ( $comment_line_value == 'full' ) {
+				$comment_line_value = 'Full';
+			}
+		} elseif ( $comment_line_name == 'profile' ) {
+			$comment_line_name = 'Backup Profile';
+		} elseif ( $comment_line_name == 'created' ) {
+			$comment_line_name = 'Creation Date';
+			if ( $comment_line_value != '' ) {
+				$comment_line_value = pb_backupbuddy::$format->date( pb_backupbuddy::$format->localize_time( $comment_line_value ) );
+			}
+		} elseif ( $comment_line_name == 'bb_version' ) {
+			$comment_line_name = 'BackupBuddy version at creation';
+		} elseif ( $comment_line_name == 'wp_version' ) {
+			$comment_line_name = 'WordPress version at creation';
+		} elseif ( $comment_line_name == 'dat_path' ) {
+			$comment_line_name = 'BackupBuddy data file (relative)';
+		} elseif ( $comment_line_name == 'posts' ) {
+			$comment_line_name = 'Total Posts';
+		} elseif ( $comment_line_name == 'pages' ) {
+			$comment_line_name = 'Total Pages';
+		} elseif ( $comment_line_name == 'comments' ) {
+			$comment_line_name = 'Total Comments';
+		} elseif ( $comment_line_name == 'users' ) {
+			$comment_line_name = 'Total Users';
+		} elseif ( $comment_line_name == 'note' ) {
+			$comment_line_name = 'User-specified note';
+			if ( $comment_line_value != '' ) {
+				$comment_line_value = '"' . htmlentities( $comment_line_value ) . '"';
+			}
+		} else {
+			$comment_line_name = $comment_line_name;
+		}
+
+		if ( $comment_line_value != '' ) {
+			return array( $comment_line_name, $comment_line_value );
+		} else {
+			return array( $comment_line_name, '-Empty-' );
+		}
+
+	} // End pretty_meta_info().
+
+
+
+	/* alert_core_table_excludes()
+	 *
+	 * Outputs an alert warning if a core db table is excluded.
+	 *
+	 * @param	array 		$excludes	Array of tables excluded from the backup.
+	 * @return	array 					Array of message warnings about potential issues found with these exclusions, if any. Index = unique identifer, Value = message.
+	 *
+	 */
+	public static function alert_core_table_excludes( $excludes ) {
+		global $wpdb;
+		$prefix = $wpdb->prefix;
+
+		// If these tables are found excluded then warn that may be a bad idea.
+		$warn_tables = array(
+			$prefix . 'comments',
+			$prefix . 'posts',
+			$prefix . 'users',
+			$prefix . 'commentmeta',
+			$prefix . 'postmeta',
+			$prefix . 'term_relationships',
+			$prefix . 'options',
+			$prefix . 'term_taxonomy',
+			$prefix . 'links',
+			$prefix . 'terms',
+		);
+
+		$return_array = array();
+		foreach( $warn_tables as $warn_table ) {
+			if ( in_array( $warn_table, $excludes ) ) {
+				$return_array['excluding_coretable-' . md5( $warn_table )] = 'Warning: You are excluding one or more core WordPress tables `' . $warn_table . '` which may result in an incomplete backup. Remove exclusions or backup with another profile or method.';
+			}
+		}
+
+		return $return_array;
+	} // End alert_core_tables_excludes().
+
+
+
+	/* alert_core_file_excludes()
+	 *
+	 * Outputs an alert warning if a core db table is excluded.
+	 *
+	 * @param	array 		$excludes		Array of paths excluded from the backup.
+	 * @return	array 						Array of message warnings about potential issues found with these exclusions, if any. Index = unique identifer, Value = message.
+	 *
+	 */
+	public static function alert_core_file_excludes( $excludes ) {
+
+		// If these paths are found excluded then warn that may be a bad idea.
+		$warn_dirs = array( // No trailing slash.
+			'/wp-content',
+			'/wp-content/uploads',
+			'/wp-content/uploads/backupbuddy_temp',
+			'/' . ltrim( str_replace( ABSPATH, '', backupbuddy_core::getBackupDirectory() ), '\\/' ),
+		);
+
+		foreach( $excludes as &$exclude ) { // Strip trailing slash(es).
+			$exclude = rtrim( $exclude, '\\/' );
+		}
+
+		$return_array = array();
+		foreach( $warn_dirs as $warn_dir ) {
+			if ( in_array( $warn_dir, $excludes ) ) {
+				$return_array['excluding_corefile-' . md5( $warn_dir )] = 'Warning: You are excluding one or more WordPress core or BackupBuddy directories `' . $warn_dir . '` which may result in an incomplete or malfunctioning backup. Remove exclusions or backup with another profile or method to avoid problems.';
+			}
+		}
+
+		return $return_array;
+	} // End alert_core_file_excludes().
+
+
+
+	/* getZipMeta()
+	 *
+	 * Output meta info in a table.
+	 *
+	 * @param	string		$file			Backup file to get comment meta data from.
+	 * @return	array|false					Array of meta data or false on failure to retrieve.
+	 *
+	 */
+	public static function getZipMeta( $file ) {
+		if ( !isset( pb_backupbuddy::$classes['zipbuddy'] ) ) {
+			require_once( pb_backupbuddy::plugin_path() . '/lib/zipbuddy/zipbuddy.php' );
+			pb_backupbuddy::$classes['zipbuddy'] = new pluginbuddy_zipbuddy( backupbuddy_core::getBackupDirectory() );
+		}
+		$comment_meta = array();
+		if ( isset( $file ) ) {
+			$comment = pb_backupbuddy::$classes['zipbuddy']->get_comment( $file );
+			$comment = backupbuddy_core::normalize_comment_data( $comment );
+
+			$comment_meta = array();
+			foreach( $comment as $comment_line_name => $comment_line_value ) { // Loop through all meta fields in the comment array to display.
+
+				if ( false !== ( $response = backupbuddy_core::pretty_meta_info( $comment_line_name, $comment_line_value ) ) ) {
+					$response[0] = '<span title="' . $comment_line_name . '">' . $response[0] . '</span>';
+					$comment_meta[$comment_line_name] = $response;
+				}
+
+			}
+		}
+
+		if ( count( $comment_meta ) > 0 ) {
+			return $comment_meta;
+		} else {
+			return false;
+		}
+	} // End getZipMeta().
+
+
+
+	/* get_dat_file_array()
+	 *
+	 * Get the DAT file contents as an array.
+	 *
+	 * @param		string		$dat_file		Full path to DAT file to decode and parse.
+	 * @return		array|false					Array of DAT content. Bool false when unable to read.
+	 *
+	 */
+	public static function get_dat_file_array( $dat_file ) {
+		pb_backupbuddy::status( 'details', 'Loading backup dat file.' );
+
+		if ( file_exists( $dat_file ) ) {
+			$backupdata = file_get_contents( $dat_file );
+		} else { // Missing.
+			pb_backupbuddy::status( 'error', 'Error #9003: BackupBuddy data file (backupbuddy_dat.php) missing or unreadable. There may be a problem with the backup file, the files could not be extracted (you may manually extract the zip file in this directory to manually do this portion of restore), or the files were deleted before this portion of the restore was reached.  Start the import process over or try manually extracting (unzipping) the files then starting over. Restore will not continue to protect integrity of any existing data.' );
+			//die( ' Halted.' );
+			return false;
+		}
+
+		// Unserialize data; If it fails it then decodes the obscufated data then unserializes it. (new dat file method starting at 2.0).
+		if ( !is_serialized( $backupdata ) || ( false === ( $return = unserialize( $backupdata ) ) ) ) {
+			// Skip first line.
+			$second_line_pos = strpos( $backupdata, "\n" ) + 1;
+			$backupdata = substr( $backupdata, $second_line_pos );
+
+			// Decode back into an array.
+			$return = unserialize( base64_decode( $backupdata ) );
+		}
+
+		if ( ! is_array( $return ) ) { // Invalid DAT content.
+			pb_backupbuddy::status( 'error', 'Error #545545. Unable to read/decode DAT file.' );
+			return false;
+		}
+
+		pb_backupbuddy::status( 'details', 'Successfully loaded backup dat file `' . $dat_file . '`.' );
+		$return_censored = $return;
+		$return_censored['db_password'] = '*HIDDEN*';
+		$return_censored = print_r( $return_censored, true );
+		$return_censored = str_replace( array( "\n", "\r" ), '; ', $return_censored );
+		pb_backupbuddy::status( 'details', 'DAT contents: ' . $return_censored );
+		return $return;
+	} // End get_dat_file_array().
+
+
+
+	/* determineLatestVersion()
+	 *
+	 * Latest version info. Array of latest major,minor. False on fail to get.
+	 *
+	 */
+	public static function determineLatestVersion() {
+		$latest_backupbuddy_version_cache_minutes = 60*12; // Define how many minutes to cache the latest backupbuddy version number.
+
+		function pb_backupbuddy_split2( $string,$needle,$nth ) {
+			$max = strlen($string);
+			$n = 0;
+			for($i=0;$i<$max;$i++){
+				if ($string[$i]==$needle){
+					$n++;
+					if($n>=$nth){
+						break;
+					}
+				}
+			}
+			$arr[] = substr($string,0,$i);
+			$arr[] = substr($string,$i+1,$max);
+			return $arr;
+		}
+		$latest_backupbuddy_version = get_transient( 'pb_backupbuddy_latest_version' );
+		if ( ( false === $latest_backupbuddy_version ) || ( ! is_array( $latest_backupbuddy_version ) ) ) {
+			$response = wp_remote_get( 'http://api.ithemes.com/product/version?apikey=ixho7dk0p244n0ob&package=backupbuddy&channel=stable', array(
+					'method' => 'GET',
+					'timeout' => 7,
+					'redirection' => 3,
+					'httpversion' => '1.0',
+					//'blocking' => true,
+					'headers' => array(),
+					'body' => null,
+					'cookies' => array()
+				)
+			);
+			if( is_wp_error( $response ) ) {
+				$latest_backupbuddy_version = array( 0, 0 ); // Set to 0 for transient to prevent hitting server again for a bit since something went wrong.
+			} else {
+				$minorVersion = $response['body'];
+				$majorVersion = pb_backupbuddy_split2( $minorVersion, '.', 3 );
+				$majorVersion = $majorVersion[0];
+				$latest_backupbuddy_version = array( $minorVersion, $majorVersion );
+			}
+			set_transient( 'pb_backupbuddy_latest_version', $latest_backupbuddy_version, 60* $latest_backupbuddy_version_cache_minutes );
+		} // end not cached.
+
+		if ( ( 0 == $latest_backupbuddy_version[0] ) && ( 0 == $latest_backupbuddy_version[1] ) ) { // Server not responding.
+			return false;
+		}
+
+		return $latest_backupbuddy_version;
+
+	} // End determineLatestVersion().
+
+
+
+	/* detectMaxExecutionTime()
+	 *
+	 * Attempt to detect the max execution time allowed by PHP. Defaults to 30 if unable to detect or a suspicious value is detected.
+	 */
+	public static function detectMaxExecutionTime() {
+		$detected_max_execution_time = str_ireplace( 's', '', ini_get( 'max_execution_time' ) );
+		if ( is_numeric( $detected_max_execution_time ) ) {
+			$detected_max_execution_time = $detected_max_execution_time;
+		} else {
+			$detected_max_execution_time = '30';
+		}
+		if ( $detected_max_execution_time == '0' ) {
+			$detected_max_execution_time = '30';
+		}
+		return $detected_max_execution_time;
+	} // End detectMaxExecutionTime().
+
+
+	/* dbEscape()
+	 *
+	 * Escape SQL using either mysql or mysqli based on whichever WordPress is using.
+	 * WP 3.9 introducing mysqli support.
+	 */
+	public static function dbEscape( $sql ) {
+		global $wpdb;
+		if ( isset( $wpdb->use_mysqli ) && ( true === $wpdb->use_mysqli ) ) { // Possible post WP 3.9
+			return mysqli_real_escape_string( $wpdb->dbh, $sql );
+		} else {
+			return mysql_real_escape_string( $sql );
+		}
+	} // End dbEscape().
+
+
+
+} // End class backupbuddy_core.
