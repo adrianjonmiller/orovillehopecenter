@@ -1,0 +1,12 @@
+[2014-10-21 03:02:21] 929 files scanned.
+[2014-10-21 03:02:21] Clear out old temporary files
+[2014-10-21 03:02:21] /var/www/vhosts/orovillehopecenter.org/httpdocs/production/wp-content/upready/tmp/BUP5445ca8f8e5127.07750949 successfully deleted
+[2014-10-21 03:02:21] /var/www/vhosts/orovillehopecenter.org/httpdocs/production/wp-content/upready/tmp/BUP5445ca96bbe711.50986012 successfully deleted
+[2014-10-21 03:02:21] Send request to generate temporary file stacks
+[2014-10-21 03:02:23] Trying to generate a stack of 500 files
+[2014-10-21 03:02:27] Temporary stack /var/www/vhosts/orovillehopecenter.org/httpdocs/production/wp-content/upready/tmp/BUP5445ccbfa08c61.67775548 successfully generated
+[2014-10-21 03:02:30] Trying to generate a stack of 429 files
+[2014-10-21 03:02:32] Temporary stack /var/www/vhosts/orovillehopecenter.org/httpdocs/production/wp-content/upready/tmp/BUP5445ccc63bcda3.81735306 successfully generated
+[2014-10-21 03:02:34] Create a backup of the file system: /var/www/vhosts/orovillehopecenter.org/httpdocs/production/wp-content/upready/backup_2014_10_21-03_02_34_id2.zip
+[2014-10-21 03:02:34] Create a backup of the database: /var/www/vhosts/orovillehopecenter.org/httpdocs/production/wp-content/upready/backup_2014_10_21-03_02_34_id2.sql
+[2014-10-21 03:02:34] Backup complete
